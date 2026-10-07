@@ -673,6 +673,9 @@ function renderView(): void {
   // order, so keeping it here made "We could not find that order" the greeting for
   // anyone arriving from the dashboard.
   show("order-missing", onOrder && !ready);
+  // The Stripe return page. Its content comes from the route, so nothing here waits
+  // on a load: `renderReturn` painted it in `applyRoute`.
+  show("view-return", effective === "paid" || effective === "unpaid");
   show("history", effective === "history");
   show("admin", effective === "admin");
   // The next-steps view owns the screen like any other: the tour is no longer a panel
@@ -1878,7 +1881,57 @@ function applyRoute(route: Route): void {
     orderLoad = "loading";
     void loadOrderById(route.orderId);
   }
+  if (route.view === "paid" || route.view === "unpaid") {
+    renderReturn(route);
+    void handOwnerToOrder(route);
+  }
   renderView();
+}
+
+/// The Stripe return page, painted from the route alone.
+///
+/// Stripe redirects to `success_url` only after a completed payment and to
+/// `cancel_url` only when the buyer backs out, so the route is the evidence of the
+/// outcome. What the route does not know is delivery, and this page does not claim
+/// it: a CLI buyer watches that where the purchase started, and an owner on this
+/// browser is handed on to the order view, which polls.
+function renderReturn(route: { view: "paid" | "unpaid"; orderId: string }): void {
+  const short = route.orderId.slice(0, 8);
+  if (route.view === "paid") {
+    el("return-headline").textContent = "Payment received";
+    el("return-detail").textContent =
+      `Order ${short} is paid. The cycles are being delivered to the account the order was created from.`;
+    el("return-next").textContent =
+      "Started this from a terminal or a tool? Go back to it to watch delivery finish. Nothing more to do here.";
+  } else {
+    el("return-headline").textContent = "Payment not completed";
+    el("return-detail").textContent = `Nothing was charged for order ${short}.`;
+    el("return-next").textContent =
+      "The order stays payable until its deadline from wherever you started it.";
+  }
+  // The one case this page cannot settle from the route: a web buyer whose session
+  // did not survive the round trip to Stripe. Offered, not forced, because the common
+  // arrival here has no session to restore.
+  show("return-sign-in-row", identity === null);
+}
+
+/// If the viewer owns the order, this page has nothing to add: the order view shows
+/// the same outcome with the figures and polls to delivery. Everyone else stays here.
+///
+/// A null answer and an unreachable gateway both leave the page as rendered. The
+/// copy made no claim that needs the lookup, so a failed lookup has nothing to
+/// retract, and "we could not find that order" is exactly the greeting this route
+/// exists to avoid.
+async function handOwnerToOrder(route: { view: "paid" | "unpaid"; orderId: string }): Promise<void> {
+  let order: Order | null;
+  try {
+    order = await backend.get_order(route.orderId);
+  } catch {
+    return;
+  }
+  // The route may have moved on while the query was in flight.
+  if (currentView !== route.view || order === null) return;
+  navigate({ view: "order", orderId: order.id }, true);
 }
 
 async function loadOrderById(orderId: string): Promise<void> {
@@ -2007,6 +2060,13 @@ function setIdentity(next: Identity | null): void {
   // reveals the header link, not the table.
   renderView();
   if (identity) {
+    // A web buyer who signed in from the return page: the probe that ran anonymously
+    // found nothing, and this one runs as the owner.
+    const route = parseRoute(window.location.hash);
+    if (route.view === "paid" || route.view === "unpaid") {
+      renderReturn(route);
+      void handOwnerToOrder(route);
+    }
     // ⚠️ Read the grant HERE, not only on the `#/admin` route: the header link has
     // to know before the operator navigates, which was the whole gap. `admin_status`
     // is a public caller-scoped query, so this costs one cheap read per sign-in and
@@ -3706,6 +3766,8 @@ async function init(): Promise<void> {
     // being a no-op after the view moved on.
     applyRoute({ view: "history", tab: "orders" });
   };
+  // Same failure reporting as the header's button, for the same reasons.
+  el("return-sign-in").onclick = () => startSignIn(showAuthError);
 
   // Test-only, and gone from a production build: `__FIXTURES__` is replaced with
   // the literal `false` unless the build sets CYCLEPAY_FIXTURES=1, so Rollup drops

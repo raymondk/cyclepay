@@ -2714,13 +2714,14 @@ test('63 — the session request is exactly what Stripe needs, asserted byte by 
     expect(body).not.toContain(forbidden);
   }
 
-  // Both return URLs point at the buyer's own order on the configured origin —
-  // admin config, never a caller parameter, because a caller-supplied success_url
-  // is an open redirect Stripe renders after a real payment.
-  const expectedReturn = encodeURIComponent(`https://integration.example/#/order/${orderId}`)
-    .replace(/!/g, '%21');
-  expect(body).toContain(`success_url=${expectedReturn}`);
-  expect(body).toContain(`cancel_url=${expectedReturn}`);
+  // Both return URLs are on the configured origin — admin config, never a caller
+  // parameter, because a caller-supplied success_url is an open redirect Stripe
+  // renders after a real payment. One route per outcome, and neither is the order
+  // page: the browser Stripe sends back may not own the order (DESIGN §10).
+  const enc = (hash: string) =>
+    encodeURIComponent(`https://integration.example/#/${hash}/${orderId}`).replace(/!/g, '%21');
+  expect(body).toContain(`success_url=${enc('paid')}`);
+  expect(body).toContain(`cancel_url=${enc('unpaid')}`);
 
   // `expires_at` asks for Stripe's 30-minute floor PLUS SLACK. Asking for exactly
   // 30 puts the value on the floor as Stripe's clock evaluates it, so a few

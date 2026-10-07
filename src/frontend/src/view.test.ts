@@ -37,6 +37,8 @@ describe("the dashboard's two records are one view with a tab", () => {
       { view: "admin", tab: "diagnostics" },
       { view: "admin", tab: "config" },
       { view: "order", orderId: "f22bd6dc4932a8480f3cee3669a48cc6" },
+      { view: "paid", orderId: "f22bd6dc4932a8480f3cee3669a48cc6" },
+      { view: "unpaid", orderId: "f22bd6dc4932a8480f3cee3669a48cc6" },
       { view: "cli" },
     ];
     for (const route of routes) {
@@ -68,6 +70,18 @@ describe("the dashboard's two records are one view with a tab", () => {
     // something else would be a silent behaviour change.
     expect(parseRoute("#/history/typo")).toEqual({ view: "landing" });
     expect(parseRoute("#/history/")).toEqual({ view: "landing" });
+  });
+
+  test("the Stripe return routes are their own views, not the order page", () => {
+    // Stripe sends the buyer to one of these two, and the browser that arrives may not
+    // own the order. Each names the id so an owner can be handed on, and a bare form
+    // with no id is a mangled URL like any other.
+    expect(parseRoute("#/paid/abc")).toEqual({ view: "paid", orderId: "abc" });
+    expect(parseRoute("#/unpaid/abc")).toEqual({ view: "unpaid", orderId: "abc" });
+    expect(parseRoute("#/paid")).toEqual({ view: "landing" });
+    expect(parseRoute("#/paid/")).toEqual({ view: "landing" });
+    expect(routeHash({ view: "paid", orderId: "abc" })).toBe("#/paid/abc");
+    expect(routeHash({ view: "unpaid", orderId: "abc" })).toBe("#/unpaid/abc");
   });
 
   test("the CLI page needs no order, and takes none", () => {

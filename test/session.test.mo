@@ -36,7 +36,7 @@ suite("form encoding", func() {
   });
 
   test("the product name and a real origin survive a round trip in shape", func() {
-    let encoded = Session.formEncode("https://abc.icp.net/#/order/deadbeef");
+    let encoded = Session.formEncode("https://abc.icp.net/#/paid/deadbeef");
     // The scheme's `//` and the fragment's `#` are both escaped, so the value
     // cannot terminate early or introduce a field.
     assert not encoded.contains(#text "#");
@@ -69,10 +69,15 @@ suite("the create body", func() {
     assert body.contains(#text "client_reference_id=2ibo7-dia_aabbccddeeff00112233445566778899");
   });
 
-  test("sends BOTH return URLs, back to the buyer's own order", func() {
-    let expected = Session.formEncode("https://abc.icp.net/#/order/aabbccddeeff00112233445566778899");
-    assert body.contains(#text("success_url=" # expected));
-    assert body.contains(#text("cancel_url=" # expected));
+  test("sends BOTH return URLs, one route per outcome, neither the order page", func() {
+    // The browser Stripe sends back may not own the order (§10): a CLI identity can
+    // be the buyer. The order page would answer it "not found"; the return routes
+    // state the outcome without a lookup.
+    let paid = Session.formEncode("https://abc.icp.net/#/paid/aabbccddeeff00112233445566778899");
+    let unpaid = Session.formEncode("https://abc.icp.net/#/unpaid/aabbccddeeff00112233445566778899");
+    assert body.contains(#text("success_url=" # paid));
+    assert body.contains(#text("cancel_url=" # unpaid));
+    assert not body.contains(#text(Session.formEncode("/#/order/")));
   });
 
   test("pins adaptive pricing off", func() {

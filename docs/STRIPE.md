@@ -98,9 +98,10 @@ sequenceDiagram
         Note over BE: Card.handleWebhook — Card.mo<br/>1. secret provisioned? → else 503, Stripe retries<br/>2. HMAC verify + ±300 s → else 400<br/>3. parse event → else 400<br/>4. dedup on event.id → else 200 "duplicate event"<br/>5. dedup on payment_intent → else 200 "duplicate payment intent"<br/>6. attribute the reference → else #35;unattributed (refund)<br/>7. ceiling + amount honoured → else #35;unattributed (refund)
         BE->>BE: markPaid → #35;paid, paidIntents[intent] = orderId
     and The buyer comes back
-        Stripe->>Buyer: redirect to success_url
-        Buyer->>FE: lands on the order page (success_url)
-        loop every 3 s until delivered
+        Stripe->>Buyer: redirect to success_url (#35;/paid/ + order id)
+        Buyer->>FE: lands on the return page
+        Note over FE: States the outcome with no lookup. The browser may not<br/>own the order (a CLI identity can be the buyer). An owner<br/>is handed on to the order page.
+        loop every 3 s until delivered (owner only)
             FE->>BE: get_order(id)
         end
     end
@@ -270,6 +271,12 @@ the UI states the actual locked figure. Once locked, nothing re-reads a rate.
 cycles-ledger account, default subaccount, and `create_order` refuses anything else with
 `#destinationNotOwned`. That is a property of the canister, not the frontend. A buyer
 funding a canister transfers on afterwards from the CLI.
+
+**The buyer need not be a browser.** Any non-anonymous principal may call
+`create_order`, so a CLI identity can buy for itself. The Checkout Session's return URLs
+are `#/paid/<id>` and `#/unpaid/<id>` rather than the order page, because the browser
+Stripe sends back may not own the order (`docs/DESIGN.md` §10): the return page states
+the outcome from the route alone and hands an owner on to the order page.
 
 **The cycles-ledger deposit fee is disclosed, not absorbed.** Delivery loses 100 M
 cycles to the ledger's deposit fee on every order; the tiles show what lands. ⚠️

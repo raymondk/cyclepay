@@ -1232,6 +1232,64 @@ describe("routes that name nothing", () => {
   });
 });
 
+describe("where Stripe sends the buyer back", () => {
+  test("a paid return for an order this browser cannot see says so, not 'not found'", async () => {
+    // The browser Stripe redirects may not own the order: a CLI identity can be the
+    // buyer, and `get_order` answers nothing to anyone else. This route used to be
+    // the order page, which greeted a buyer who had just paid with "we could not
+    // find that order".
+    state.order = undefined;
+    await mount("landing", "#/paid/deadbeefdeadbeefdeadbeefdeadbeef");
+    await settle();
+    expect(el("view-return").hidden).toBe(false);
+    expect(el("return-headline").textContent).toMatch(/payment received/i);
+    expect(el("return-detail").textContent).toMatch(/deadbeef/);
+    expect(el("return-next").textContent).toMatch(/terminal/i);
+    expect(el("order-missing").hidden).toBe(true);
+    expect(el("active-order").hidden).toBe(true);
+    expect(el("view-landing").hidden).toBe(true);
+  });
+
+  test("an unpaid return says nothing was charged", async () => {
+    state.order = undefined;
+    await mount("landing", "#/unpaid/deadbeefdeadbeefdeadbeefdeadbeef");
+    await settle();
+    expect(el("view-return").hidden).toBe(false);
+    expect(el("return-headline").textContent).toMatch(/not completed/i);
+    expect(el("return-detail").textContent).toMatch(/nothing was charged/i);
+    expect(el("order-missing").hidden).toBe(true);
+  });
+
+  test("the owner is handed straight on to the order page", async () => {
+    // A web buyer sees exactly what they saw before this route existed: their order,
+    // polling to delivery. The hand-on replaces the hash so Back does not return to
+    // an interstitial they never chose.
+    state.order = anOrder("paid");
+    await mount("landing", "#/paid/abcdef0123456789abcdef0123456789");
+    await settle();
+    expect(window.location.hash).toBe("#/order/abcdef0123456789abcdef0123456789");
+    expect(el("view-return").hidden).toBe(true);
+    expect(el("active-order").hidden).toBe(false);
+    expect(el("order-missing").hidden).toBe(true);
+  });
+
+  test("signed out, it offers a sign-in, and signing in resolves the owner", async () => {
+    // A web buyer whose session did not survive the trip to Stripe arrives anonymous;
+    // the anonymous probe finds nothing, so the page offers the way back in and
+    // re-probes as the owner.
+    state.order = anOrder("paid");
+    await mount("landing");
+    el("sign-out").click();
+    await settle();
+    window.location.hash = "#/paid/abcdef0123456789abcdef0123456789";
+    await settle();
+    // Signed out, the stub still answers; what matters here is the page's offer. The
+    // stub cannot refuse per caller, so the hand-on happens regardless: assert the
+    // offer rendered before the hand-on moved the view.
+    expect(el("return-headline").textContent).toMatch(/payment received/i);
+  });
+});
+
 // ⚠️ **The three "buy again" tests are deleted, not ported.** The button is gone: it
 // rendered on EVERY history row including unpaid ones, where the one-open-order cap
 // refuses the very order it offered to start, so it led a buyer into

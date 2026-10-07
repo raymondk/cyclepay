@@ -644,6 +644,21 @@
         <p><a href="#/history">Back to your dashboard</a></p>
       </section>
 
+      <!-- Where Stripe sends the buyer back. NOT the order page: the browser arriving
+           here may not own the order (a CLI identity can be the buyer, and get_order
+           answers nothing to anyone else), so the copy states the outcome from the
+           route alone. main.ts hands an owner on to the order view. -->
+      <section id="view-return" class="view" hidden>
+        <h2 id="return-headline" class="section-h"></h2>
+        <p id="return-detail" class="lede"></p>
+        <p id="return-next" class="muted"></p>
+        <div id="return-sign-in-row" class="card-action" hidden>
+          <p class="muted">Bought this order in your browser? Sign in to see it.</p>
+          <button id="return-sign-in" type="button" class="cta-secondary">Sign in</button>
+        </div>
+        <p><a id="return-back" href="#/">Back to the start</a></p>
+      </section>
+
       <section id="history" class="view" hidden>
         <h2 class="section-h">Your cycles</h2>
 

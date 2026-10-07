@@ -58,8 +58,8 @@ module {
     /// Non-loopback `http://`. A plain-HTTP return URL after a card payment is not a
     /// thing to offer, and Stripe would render it.
     #notHttps;
-    /// A query string or fragment would collide with the `#/order/<id>` route appended
-    /// to it, producing a URL that does not resolve to the order.
+    /// A query string or fragment would collide with the `#/paid/<id>` return route
+    /// appended to it, producing a URL that does not resolve to the return page.
     #hasQueryOrFragment;
     /// No authority at all — `https://`, `http:///path`. The scheme is fine and there
     /// is nothing to return a buyer to.
@@ -95,7 +95,7 @@ module {
       return #err(#hasQueryOrFragment);
     };
     // Trailing slash trimmed here rather than at every use site, so
-    // `origin # "/#/order/" # id` cannot produce a double slash.
+    // `origin # "/#/paid/" # id` cannot produce a double slash.
     #ok(origin.trimEnd(#char '/'));
   };
 
@@ -184,7 +184,7 @@ module {
   /// both are accepted in a form body and `%20` needs no special case.
   ///
   /// Encoding is not optional here even though the current inputs look tame: the
-  /// product name carries an amount, `success_url` carries `#/order/<id>`, and a
+  /// product name carries an amount, `success_url` carries `#/paid/<id>`, and a
   /// bare `#` would truncate the value at the fragment. It is also the difference
   /// between an operator-set origin and a parameter-injection bug.
   public func formEncode(text : Text) : Text {
@@ -276,10 +276,14 @@ module {
       ("line_items[0][price_data][product_data][name]", "Cycles for the Internet Computer"),
       ("client_reference_id", args.clientReferenceId),
       ("expires_at", args.expiresAtSeconds.toText()),
-      // Back to the buyer's own order page, both ways. Without `cancel_url` a
-      // buyer who backs out of Stripe lands somewhere we did not choose.
-      ("success_url", args.origin # "/#/order/" # args.orderId),
-      ("cancel_url", args.origin # "/#/order/" # args.orderId),
+      // Two return routes, one per outcome, and neither is the order page (§10).
+      // The browser Stripe redirects is not necessarily the order's owner: a CLI
+      // identity may have created the order, and `get_order` answers nothing to
+      // anyone else. The return page states the outcome without a lookup and hands
+      // an owner on to the order view. Without `cancel_url` a buyer who backs out
+      // of Stripe lands somewhere we did not choose.
+      ("success_url", args.origin # "/#/paid/" # args.orderId),
+      ("cancel_url", args.origin # "/#/unpaid/" # args.orderId),
       ("adaptive_pricing[enabled]", "false"),
     ];
     var body = "";
