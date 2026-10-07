@@ -1,110 +1,51 @@
 # Deleted-mechanism vocabulary — the sweep list
 
 **When you delete a mechanism, add its vocabulary here. When you sweep, start from this
-file.**
+file.** `scripts/sweep-vocabulary.py` reads the table below, scans the lines a change
+adds, and prints each hit with its disposition. It is the last gate step so its output
+sits above the summary. It passes on hits: most are correct prose, and a reviewer decides.
+It fails only on an undeterminable base ref, which is the didn't-run case. An empty diff
+is a pass.
 
-⚠️ **This exists because the failure is *reconstructed from memory each sweep*, not
-*nobody is checking*.** Three consecutive sweeps in this repo were run with a term list
-assembled from the mechanisms someone happened to remember naming, and a reviewer found
-the population incomplete each time. The clearest case: `ring`, `capacity`, `float`,
-`treasury` and `burn cap` were swept, and **`evict`** — the *verb* for what the deleted
-mechanism did — was not. Five survivors, including a second dangling `AddResult.evicted`
-**118 lines from the one that had just been fixed**, and an operator-facing RUNBOOK line
-stating a cap that no longer exists as a parameter.
+Three kinds of term, because missing any one has already cost a sweep:
 
-This is `AGENTS.md`'s population rule applied one level up. That rule says *a rule
-introduced to fix specific instances is not applied until it has been run against the full
-population once* — and a sweep scoped to remembered terms is that rule failing at the level
-of **terms** rather than **sites**.
-
-## What to add, when you delete something
-
-Three kinds of term, because missing any one of them has already cost a sweep:
-
-1. **The noun** — what the thing was called (`ring`, `treasury`).
-2. ⚠️ **The verb** — what it *did* (`evict`, `mint`, `reprice`). This is the one that gets
-   forgotten, and prose cites verbs more often than nouns.
+1. **The noun** (`ring`, `treasury`).
+2. ⚠️ **The verb** for what it did (`evict`, `mint`, `reprice`). Prose cites verbs more
+   often than nouns, and `evict` was the one a sweep of `ring`/`capacity`/`float` missed,
+   leaving an operator-facing RUNBOOK line stating a cap that no longer existed.
 3. ⚠️ **The names of deleted variants and fields** (`#deliveryDelayed`,
-   `AddResult.evicted`). These hide in tables and doc comments that a code-shaped grep
-   never reads — two of them were **live operator triage rows** for entries that can never
-   appear.
+   `AddResult.evicted`). They hide in tables and doc comments that a code-shaped grep
+   never reads; two were live operator triage rows for entries that can never appear.
 
-## Why it scans the DIFF, prints, and does not fail on a hit
+## Three row types, cleared differently
 
-**A fixed target can be enforced; a judgement call can only be surfaced.** Most hits are
-*correct*:
+1. **Dead vocabulary** (most rows): the term should appear only in end-state statements.
+   Clear a new hit by fixing the prose.
+2. ⚠️ **A tripwire on a live name** (`icrc1_fee`): the concept exists; what must never
+   happen is a *call*. Its absence from the ledger's service type is the guard behind the
+   fee-derivation rule (§5.1), which no test can catch. Clear a hit only by confirming it
+   is still not a call.
+3. ⚠️ **A live name colliding with a deleted one** (`#abandoned` is a live order status;
+   only the queue *kind* of that name went). A bare count for this row is misleading.
 
-- `mint` is legitimate: the CMC is literally the Cycles **Minting** Canister.
-- `retention` is legitimate: `Idempotency.mo` has real dedup-key retention.
-- *"Nothing is ever evicted (#37)"* is legitimate — a statement of the end state.
-
-So the step prints its hits and exits zero. A check that fires on correct code teaches
-people to ignore it, and this project has rejected that trade before: widening a lint
-pattern flagged a script's deliberate interpolation, and it was reverted.
-
-⚠️ **What it DOES fail on is an undeterminable base ref**, because that is the didn't-run
-case. A scan that silently had nothing to scan reads exactly like a clean one.
-
-⚠️ **An empty diff is a pass, not an abort** — unlike every other gate step, where empty
-input means the step is aimed at nothing. Here it means the change added no lines, which
-is a true answer to the question asked.
-
-⚠️ **Scoped to added lines, and keeping no counts, for two reasons that are not
-convenience.** A count cannot distinguish "removed two legitimate uses, added one stale
-claim" from "removed one" — offsetting moves net out, so a prose-purging change that also
-introduces a stale claim reads clean. And a count needs a population, so it needs globs,
-and a glob list goes stale in silence. Added lines have neither hole: every added line in
-the tree is in scope, wherever it lives, and a stale claim is a stale claim regardless of
-what else the change did.
-
-## ⚠️ Three row types, and they are cleared differently
-
-A future sweeper treating every row the same will clear the second kind by **rewording**
-when the check it needs is **whether anything now calls it**.
-
-1. **Dead vocabulary** (most rows). The term should appear only in end-state or historical
-   statements. Clear a new hit by fixing the prose.
-2. ⚠️ **A tripwire on a LIVE name** — `icrc1_fee`. The concept still exists; what must
-   never happen is a *call*. Its absence from the ledger's service type is the guard behind
-   the fee-derivation rule (§5.1), the one rule here **no test can catch**. Clear a new hit
-   only by confirming it is still not a call.
-3. ⚠️ **A live name colliding with a deleted one** — `#abandoned` is a live order
-   **status**; only the queue *kind* of that name went. A bare count for this row is
-   actively misleading, and high is normal.
+The script excludes this file, since every term appears here by construction.
 
 ## Known-collision terms
 
-⚠️ **These four are live names, and their hits are almost always correct.** The scan prints
-them in a separate section BELOW its main list, because the value of a print-only step is
-entirely a reader's willingness to look at it — and a real hit buried among three
-predictable ones is something to triage rather than something to see.
-
-Measured on #86: of four hits, three were these and the fourth was the defect.
+Live names whose hits are almost always correct. The scan prints them in a separate
+section below its main list, so a real hit is not buried among predictable ones. A term
+listed here is de-emphasised, never skipped; if this section is renamed or emptied every
+term prints in the main list.
 
 - `\bmint` — the CMC is the Cycles **Minting** Canister, a live dependency.
 - `\bretention\b` — `Idempotency.mo` prunes dedup keys on a real retention window.
 - `#abandoned` — a live order **status**; only the deleted queue *kind* shared the name.
 - `icrc1_fee` — a live ledger method. Row type 2: the hit is fine, a *call* is not.
 
-⚠️ **A term listed here is de-emphasised, never skipped.** If this section is renamed or
-emptied, every term prints in the main list — the failure direction is more prominence,
-not less.
+## The terms
 
-## Running it
-
-`scripts/sweep-vocabulary.py` scans the lines your change adds, against the terms below,
-and prints what it finds with the disposition alongside. It is the LAST gate step — placed
-there deliberately, so its output sits immediately above the summary, where it gets read —
-so a normal run reports it for you. Run it directly with `--base <ref>` to scan against
-something other than the default branch.
-
-⚠️ **The script excludes THIS file.** Every term appears here by construction, so
-including it would report the question as the answer. That is not an exemption — it is the
-difference between scanning the corpus and scanning the list.
-
-⚠️ **A disposition is durable; a count was not.** These rows say what the word meant, that
-the thing is gone, and what makes a new use wrong. That stays true as the code moves. The
-numbers that used to sit here did not, and nothing ran to catch them expiring.
+A disposition says what the word meant, that the thing is gone, and what makes a new
+use wrong. No counts: they expired and nothing caught them.
 
 | term | disposition |
 |---|---|
