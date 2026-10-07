@@ -1,11 +1,11 @@
 # What is tested, how, and what is not
 
-One place to answer "is X covered?". Run everything with `scripts/test-all.sh`.
+One place to answer "is X covered?". `scripts/test-all.sh` runs the whole gate,
+fail-fast; `--fast` skips PocketIC.
 
 ## Running them
 
-`scripts/test-all.sh` runs the whole gate, fail-fast; `--fast` skips PocketIC. Two suites
-need a one-time install, and one needs a specific kernel:
+Two suites need a one-time install:
 
 ```sh
 npm --prefix test/browser ci                             # first run only
@@ -13,7 +13,7 @@ npx --prefix test/browser playwright install chromium    # first run only
 cd test/integration && npm ci                            # first run only
 ```
 
-Per suite, when you want one rather than the gate:
+Per suite:
 
 ```sh
 mops test                                    # Motoko unit
@@ -23,63 +23,49 @@ npm --prefix test/browser test               # Playwright, Chromium
 npm --prefix test/integration test           # PocketIC
 ```
 
-⚠️ **`npm test`, never `npx vitest run`, in `test/integration`.** The `pretest` hook
-fetches the sha256-pinned ledger wasms and rebuilds the backend; skipping it tests a
-stale wasm and passes.
-
-⚠️ **PocketIC needs a 4 KiB-page kernel.** macOS and x86_64 Linux are fine; the replica
-cannot run inside an arm64 Linux guest with 16 KiB pages (an Apple-Silicon Docker VM, for
-instance). Node ≥ 20.11 and `mops` on `PATH`.
+- ⚠️ **`npm test`, never `npx vitest run`, in `test/integration`.** The `pretest` hook
+  fetches the sha256-pinned ledger wasms and rebuilds the backend; skipping it tests a
+  stale wasm and passes.
+- ⚠️ **PocketIC needs a 4 KiB-page kernel.** macOS and x86_64 Linux are fine; the replica
+  cannot run inside an arm64 Linux guest with 16 KiB pages. Node ≥ 20.11 and `mops` on
+  `PATH`.
 
 ## The automated suites
 
-Counts are deliberately absent: they drifted in three separate documents over one
-week of work, and a wrong number is worse than no number. Run
-`scripts/test-all.sh` for the live figures, and see `test/integration/README.md`
-for the scenario map by id — ids are stable, counts are not.
+Counts are deliberately absent: they drift. `test/integration/README.md` has the
+scenario map by id.
 
 | Suite | What it covers | How |
 |---|---|---|
-| **Motoko unit** (`test/*.test.mo`) | pure logic: HMAC, the Stripe signature scheme, JSON parsing, fee/rate arithmetic, the §4 state machine, dedup, order-bound problems and the orphan list, every money position `Delivery.terminationFor` can report, `stageOf`'s resume decisions, and reserve solvency | `mops test`. No IC environment — every module takes its dependencies as a record (`Card.Deps`), which is why the whole ingestion path is unit-testable |
+| **Motoko unit** (`test/*.test.mo`) | pure logic: HMAC, the Stripe signature scheme, JSON parsing, fee/rate arithmetic, the §4 state machine, dedup, order-bound problems and the orphan list, every money position `Delivery.terminationFor` can report, `stageOf`'s resume decisions, and reserve solvency | `mops test`. No IC environment: every module takes its dependencies as a record |
 | **Frontend pure** (`format.test.ts`) | status mapping, cycle/USD formatting, the §3 pricing vector, slippage flooring, deposit-fee subtraction, receipt verification, every error-message mapping | `vitest` |
-| **Frontend DOM** (`main.test.ts`) | the real `index.html` body in jsdom with a stubbed backend: tier estimates, fee split, the single route into the buy form, the destination it sends (read from the session, never the form), the acknowledge-then-confirm quote flow, cancel visibility, the receipt render, the view machine (including the poll's own arrival at `delivered`, under fake timers) | `vitest` + jsdom |
-| **Browser** (`test/browser/*.spec.ts`) | what jsdom is structurally blind to: the cascade, layout, reachability, and — via committed screenshot baselines — paint. Runs against a production build served statically, with an unreachable gateway by default and a canned one where a spec needs answers | `npm --prefix test/browser test` (Playwright, Chromium) |
+| **Frontend DOM** (`main.test.ts`) | the real `index.html` body in jsdom with a stubbed backend: tier estimates, fee split, the route into the buy form, the destination it sends, the acknowledge-then-confirm quote flow, cancel visibility, the receipt render, the view machine under fake timers | `vitest` + jsdom |
+| **Browser** (`test/browser/*.spec.ts`) | what jsdom is structurally blind to: the cascade, layout, reachability, and, via committed screenshot baselines, paint. Runs against a production build served statically | `npm --prefix test/browser test` (Playwright, Chromium) |
 | **PocketIC** (`test/integration/src/*.spec.ts`) | end-to-end against the **real** ICP ledger, CMC and cycles ledger, plus a sha256-pinned XRC mock at the mainnet id | `npm --prefix test/integration test` |
 
 ### What makes the PocketIC suite the real bar
 
 - **Real NNS wasms**, at their mainnet ids, deployed by `icpFeatures`.
-- **Real HMAC-signed Stripe payloads**, signed by an independent Node
-  implementation — so it is not testing our signer against our verifier.
-- **Time control**: the 2 h delay alert and the 72 h terminate bound are reachable
-  in seconds; the ledger's 24 h dedup window likewise.
-- **HTTPS outcalls are PARKED, not performed**. Every `create_order` and
-  `cancel_order` blocks on one, and the suite answers it — which for the request
-  *shape* is better coverage than a live call, because the exact bytes the
-  canister built can be read back (scenario 63 does). Three things it cannot tell
-  you, and the third was measured rather than assumed:
-  - the real cycle cost;
-  - whether `max_response_bytes` is big enough for a real Stripe response;
-  - **whether the transform strips enough for consensus.** pic-js can answer with
-    one response per replica, which looks like a way to test this — a scenario
-    was written on that basis, then `Session.strip` was mutated to leak every
-    header and the whole suite still passed. The mock does not enforce consensus
-    the way a subnet does. That failure is first observable against real Stripe,
-    where it takes the rail down; `Session.classifyFailure` labels it so the audit
-    log points at the transform.
-- **Failure injection**: the NNS canisters can be *stopped* (`stopNns`,
-  impersonating NNS root) to force real outages. The one that matters is the
-  **cycles ledger**, and stopping it is how scenarios 11, 33, 35, 47 and 80 hold an
-  order undelivered. It is the only injectable cause: delivery reads no
-  rate and asks no other canister, so nothing else can stall it.
-  ⚠️ Read balances **before** stopping and put the stop in `try`/`finally`: a throw
-  in between leaves the ledger stopped for the rest of the run. See the coupling
-  note in `test/integration/README.md`.
-- **Real HTTP**: `pic.makeLive()` serves an actual gateway, so scenario 55 proves
-  the webhook route over genuine HTTP rather than a Candid call to
-  `http_request_update`.
-- **Upgrade-mid-flight**: real stop→upgrade(EOP keep)→start inside the §5.1
-  ambiguity windows, asserting exactly-one ledger debit.
+- **Real HMAC-signed Stripe payloads**, signed by an independent Node implementation, so
+  it is not testing our signer against our verifier.
+- **Time control**: the 2 h delay alert, the 72 h terminate bound and the ledger's 24 h
+  dedup window are reachable in seconds.
+- **HTTPS outcalls are parked, not performed.** Every `create_order` and `cancel_order`
+  blocks on one, and the suite answers it, so the exact bytes the canister built can be
+  read back (scenario 63). Three things it cannot tell you: the real cycle cost; whether
+  `max_response_bytes` is big enough for a real Stripe response; and ⚠️ **whether the
+  transform strips enough for consensus**. The mock does not enforce consensus the way a
+  subnet does (verified by mutating `Session.strip` to leak every header: the suite
+  stayed green). That failure is first observable against real Stripe.
+- **Failure injection**: the NNS canisters can be stopped (`stopNns`, impersonating NNS
+  root). The one that matters is the **cycles ledger**, which is how scenarios 11, 33, 35,
+  47 and 80 hold an order undelivered; delivery asks no other canister, so nothing else
+  can stall it. ⚠️ Read balances **before** stopping and put the stop in `try`/`finally`:
+  a throw in between leaves the ledger stopped for the rest of the run.
+- **Real HTTP**: `pic.makeLive()` serves an actual gateway, so scenario 55 proves the
+  webhook route over genuine HTTP.
+- **Upgrade-mid-flight**: real stop → upgrade (EOP keep) → start inside the §5.1
+  ambiguity windows, asserting exactly one ledger debit.
 
 ## Coverage by concern
 
@@ -87,260 +73,126 @@ for the scenario map by id — ids are stable, counts are not.
 |---|---|---|
 | Signature verification (rotation overlap, both-direction window, constant-time compare) | unit + PocketIC | externally pinned vectors |
 | Attribution (claimed-not-trusted, owner mismatch, malformed, expired, cancelled) | unit + PocketIC | |
-| Amount honouring (exact → delivers; any other amount → a refundable obligation, delivering nothing; ceiling; currency) | unit + PocketIC | the mismatch branch is mutation-checked: disabling the equality check fails the suite |
+| Amount honouring (exact → delivers; any other amount → a refundable obligation; ceiling; currency) | unit + PocketIC | mutation-checked: disabling the equality check fails the suite |
 | Dedup / replay (event id, payment intent, post-prune resend, credited-elsewhere) | unit + PocketIC | |
 | Refunds (full, partial, cumulative partials, after delivery, of an escalated order) | unit + PocketIC | |
 | Async payment methods (settle, fail, out-of-order) | unit + PocketIC | |
 | Pricing guards (plausibility, delta, source count, implied XDR/USD, staleness) | unit + PocketIC | every guard rejects in isolation |
 | Money-out: **one transfer** out of the reserve, exactly-once, journal replay | PocketIC | incl. across real upgrades |
-| Outages: the **cycles ledger** down — delivery retries, strands nothing, then delivers | PocketIC | 11, 33, 35, 47 |
-| Escalation → the right money position and instruction | unit (all 8 arms) + PocketIC | see the gap below |
+| Outages: the **cycles ledger** down; delivery retries, strands nothing, then delivers | PocketIC | 11, 33, 35, 47 |
+| Escalation → the right money position and instruction | unit (all 8 arms) + PocketIC | see the gaps below |
 | Delay alerts, and **which** of the two terminal bounds fires | PocketIC | 47 (alert cleared on escalation), 80 (24 h dedup window), 35 (72 h max hold) |
 | Buyer never stuck: cancel, expiry, late payment, quote pinning | PocketIC | |
 | Frontend state machine and reactions | jsdom (`main.test.ts`) | real `index.html` body, stubbed backend |
-| Frontend **rendering**: cascade, layout, reachability, paint | browser (`test/browser`) | screenshot baselines for paint; see below for what is still uncovered |
+| Frontend **rendering**: cascade, layout, reachability, paint | browser (`test/browser`) | screenshot baselines for paint |
+
+## Mutations that are caught
+
+Each was applied to the tree and the suite run, because "no test catches it" is only
+meaningful next to a list of what does:
+
+| Mutation | Caught by |
+|---|---|
+| drop the `#paid` clause from `unsettledDelivery` (the escalation-freeze bug) | scenarios **73** and **76** |
+| credit the floor back on `#delivered`, a real debit, breaking §5.4 rule 2/3's asymmetry in the optimistic direction | an `afterEach` hook asserting `reserveFloor ≤ reserveBalance`, which fails at scenario **06**, the first delivery in the suite. Every scenario anyone adds is born checkpointed |
+| `openEntry` recording a hardcoded status instead of the order's | `test/cmc.test.mo`'s coupling test, and scenario **75** |
 
 ## What is not covered, and why
 
 ### 1. The frontend against a real backend, and real Internet Identity
 
-Two layers cover the frontend, and the split is deliberate.
+`main.test.ts` runs the real `index.html` body in jsdom with a stubbed backend; the
+backend's behaviour is already proven by the PocketIC suite, and a stub is the only way
+to drive a `#quoteChanged`, a delivered receipt, or a poll transition on demand.
+`test/browser` runs a production build in Chromium, because jsdom has neither a cascade
+nor a layout: `el.hidden` reads `true` for an element a class selector is keeping on
+screen, and a pulse painting *over* step numbers was found only by a screenshot
+baseline. A test-only fixture hook (`src/frontend/src/fixtures.ts`) replaces the backend
+and nothing else, so sign-in, routing, the view machine and the 3 s poll are the app's
+own code; it is absent from a production build (`__FIXTURES__` is a `define`d literal,
+and `scripts/test-all.sh` greps the shipping bundle).
 
-`main.test.ts` runs the **real `index.html` body** in jsdom with a stubbed backend,
-so a renamed id fails the test. The stub is not a weakness: the backend's behaviour
-is already proven by the PocketIC suite, and a stub is the only way to drive a
-`#quoteChanged`, a delivered receipt, or a poll transition on demand.
+What no suite closes, and `docs/SANDBOX-TESTPLAN.md` carries:
 
-`test/browser` runs a **production build in Chromium**, because jsdom has neither a
-cascade nor a layout and is therefore blind to a whole class of bug that has shipped
-here twice: `el.hidden` reads `true` for an element a class selector is keeping on
-screen. It covers reachability (can a person actually get from here to the next
-step), and — through committed `toHaveScreenshot()` baselines — paint, which no
-assertion reaches. The pulse in the hero figure painting *over* the step numbers was
-found that way, after every visibility, opacity and font assertion passed.
+- **The CLI handoff.** `icp identity link web` has never been run, so "the cycles are
+  reachable from the CLI" is unproven. Two of its five steps are unreachable by any
+  suite: the id.ai CLI-access switch is a setting in another product, and the delegation
+  the link command returns needs a real browser sign-in.
+- **Real Stripe payload capture.** 3 of 8 fixtures are committed; the remaining
+  integration tests stay skipped until the rest are captured, and the suite prints which
+  are missing on every run.
+- **Refunds, async payment methods, disputes, and anything live-mode.**
 
-A **test-only fixture hook** (`src/frontend/src/fixtures.ts`) is what makes the
-post-purchase surfaces reachable at all. It replaces the backend and nothing else,
-so sign-in, routing, the view machine and the 3 s poll are the app's own code; it is
-absent from a production build (`__FIXTURES__` is a `define`d literal, and
-`scripts/test-all.sh` greps the shipping bundle to keep that checked rather than
-claimed). Before it existed the delivered view could only be photographed by
-injecting DOM state, which is how it shipped broken twice.
+### 1b. Outcall consensus is not testable anywhere before mainnet
 
-**Both of those were done by hand on 2026-08-13** against a local network and a
-Stripe sandbox, and no mainnet deploy was needed: real Internet Identity login (the
-local II the network deploys), the deployed asset canister's real `ic_env` cookie,
-the real hosted Checkout page, a genuinely signed webhook, and cycles credited to the
-buyer's account. Twice, with no open obligations and nothing held. The figures are in
-`docs/SANDBOX-TESTPLAN.md`.
+A local network is a single replica, so HTTPS-outcall consensus is never exercised
+locally, by any run, manual or automated. PocketIC mocks the outcall, so the transform
+runs but no consensus step exists. ⚠️ **It is therefore first tested on the first
+mainnet outcall**, and the failure mode is `No consensus could be reached. Replicas had
+different responses.` Two mechanisms carry it: the transform strips every response
+header (`rails/Session.mo`), and `Idempotency-Key = orderId` on the session create,
+without which each replica creates a distinct session and no transform can repair the
+disagreement. Both are arguments, not test results.
 
-⚠️ **That run predates the current money-out path, so read it as evidence about the
-browser and Stripe halves only.** It delivered by minting through the CMC against an
-ICP float; money-out is now a single cycles-ledger transfer out of a funded reserve,
-and the ICP machinery is deleted. What the run still evidences — sign-in, the hosted
-Checkout page, a real signed webhook reaching the canister, the frontend's poll to a
-delivered view — is untouched by that change. What it no longer evidences is delivery
-itself. **A fresh manual run is owed before go-live**, and it is the reason
-`docs/SANDBOX-TESTPLAN.md` still carries a procedure rather than only a record.
-
-**Three things that run did not close**, and no suite closes either:
-
-- **The CLI handoff.** `icp identity link web` was never run, so "the cycles are
-  reachable from the CLI" — the last step the product promises — is unproven. Group
-  H4. ⚠️ **Two of its five steps are unreachable by any suite here**, which is why no
-  amount of frontend testing closes it: the id.ai CLI-access switch is a setting in
-  another product, and the delegation the link command returns needs a real browser
-  sign-in. What the suites do cover is that the page renders the right commands, in
-  order, against the values it is itself showing.
-- **Real Stripe payload capture.** 3 of 8 fixtures are committed; five integration
-  tests stay skipped until the rest are captured (group I). The suite prints
-  which are missing on every run rather than hiding it.
-- **Refunds, async payment methods, disputes, and anything live-mode.** Groups E, F,
-  G, and a separate decision respectively.
-
-### 1b. Mutations that ARE caught — run, not assumed
-
-The rows below this one record gaps. These record the opposite, because "no test catches
-it" is only meaningful next to a list of what does. Each was applied to the tree and the
-suite run:
-
-| Mutation | Caught by |
-|---|---|
-| drop the `#paid` clause from `unsettledDelivery` (the escalation-freeze bug, which shipped into the branch once) | scenarios **73** and **76** — 76 by design, 73 because a frozen reconcile stops adopting a top-up |
-| credit the floor back on `#delivered` — a **real** debit, i.e. breaking rule 2/3's asymmetry in the optimistic direction | an `afterEach` hook asserting `reserveFloor ≤ reserveBalance`, which fails at scenario **06** — the first delivery in the suite. ⚠️ **The history of this row is the useful part.** The bound was originally one assertion inside 73: enough to catch this mutation, and not enough to be the safety net it was described as, since it checked history up to 73 and nothing after. Widening it to three scenarios fixed three instances; the hook fixes the class, and moved the catch 60+ scenarios earlier — onto the scenario that *causes* the optimism rather than a distant one. Every scenario anyone adds is now born checkpointed |
-| `openEntry` recording a hardcoded status instead of the order's | `test/cmc.test.mo`'s coupling test, added after the bug — and scenario **75**, which found it originally by asserting a set was non-empty |
-
-### 1c. ⚠️ The comment purge — the one change in this project with NO artifact
-
-Recorded here because this is the document whose job is saying what nothing checks, and
-because a green gate on a large comment deletion is the most inviting false signal in the
-repo.
-
-**Every other sweep in this project has a verifier.** A wrong tally fails a unit test; a
-stale `.did` fails step 4; a doc claiming a method that does not exist fails step 5; a
-`§N` with no section fails step 6. **Deleting a comment has none.** No compiler error, no
-red test, and the diff shows what left but not what was *lost* — the reviewer sees the
-removal and has nothing to compare it against. The gate passing on such a change proves
-**nothing was broken, not that nothing was lost.**
-
-⚠️ **And the risk is not symmetric with leaving them.** Pass 1 found a 49-line block
-analysing the interleavings of an `await` that no longer exists, which asserted *"the fix
-is in `admitOrder`: the tally is snapshotted and the decision uses `max(snapshot,
-live)`"* — `admitOrder` is synchronous and contains neither. A reader who checks wastes an
-hour; a reader who trusts it reasons about the next change believing a protection exists
-that does not. It also found a 12-line doc block that had drifted 200 lines onto the wrong
-function. **At 50% comments nobody reads closely enough to catch either**, so volume is
-what produced both.
-
-**The mitigation is procedural, in `AGENTS.md`, because no check can substitute:**
-
-| | rule | what it buys |
-|---|---|---|
-| 1 | **Name the mistake the comment prevents.** No nameable mistake, not a keeper | turns "feels useful" into a claim that can be disputed |
-| 2 | **Never delete without a destination** — `docs/DESIGN.md` or a rule rewritten at the site | a removal with *no* destination is the only case a reviewer cannot check, so it is the category to scrutinise |
-| 3 | **The commit message carries the mapping** — what moved where | the sole recoverable record if a judgement turns out wrong |
-
-⚠️ **State the glob wherever a count is recorded.** Every "backend" figure in this
-series was `src/backend/*.mo`, which **excludes `src/backend/rails/`** — 1,509 lines and
-642 comment lines that were not in the first four passes. The ratio happened to be
-identical (45% either way), but the absolute numbers differ by ~1,500 lines and the next
-person will compare against them. Same population-scope class as the sweeps themselves,
-arriving one last time in the measurement of the cleanup.
-
-⚠️ **State the METHOD too, because two correct methods disagree.** The line counts in
-this series used `text.split("\n")`, which yields a trailing empty element for a
-newline-terminated file — so they read **one line higher per file** than `wc -l`. Measured:
-23 files, delta exactly 23 (10,265 vs 10,242). Neither is wrong; they count different
-things. One notch finer than "state the glob", and the same lesson.
-
-⚠️ **Check a measurement against a bound you already know.** A block-detector reported
-"129 blocks of ≥18 lines" in a file with 1,800 comment lines — arithmetically impossible,
-and caught by that multiplication rather than by re-reading the code. Correct figure: 20.
-When a measurement produces a number, test it against something already known before
-reporting it.
-
-⚠️ **Read pass rates with suspicion.** `Reserve.mo` (a small pure module, comments mostly
-invariant arguments — the category that *stays*) and the first two `Main.mo` blocks (both
-documenting deleted code) mislead in **opposite** directions. `Main.mo` alone has 53
-blocks of ≥12 comment lines; no rate should be projected from a handful.
-
-### 1d. ⚠️ Outcall CONSENSUS is not testable anywhere before mainnet
-
-Recorded because it was described in review as part of the manual sandbox run's residual,
-and that is wrong in a way that changes where you look for it.
-
-**A local network is a single replica.** HTTPS-outcall consensus is agreement between the
-replicas of a subnet on the transformed response — so with one replica there is nothing to
-agree, and the property is **never exercised locally, by any run, manual or automated**. No
-local procedure could ever have covered it, and a green local run is not weak evidence
-about it; it is *no* evidence.
-
-PocketIC does not cover it either: it mocks the outcall, so the transform runs but no
-consensus step exists.
-
-⚠️ **It is therefore first tested on the first mainnet outcall**, and the failure mode is
-`No consensus could be reached. Replicas had different responses.`
-
-⚠️ **TWO mechanisms carry it, and this is the only place recording that before mainnet — so
-name both, or someone reads the second as dedup-only and removes it.**
-
-1. **The transform strips every response header** (`rails/Session.mo`), which is the
-   documented source of per-replica variation in the *response*.
-2. **`Idempotency-Key = orderId` on the session create** does double duty. Every replica
-   performs the outcall independently, so without the key each creates a **distinct
-   session with a distinct `id` and `url`** — one order spawns many sessions, and
-   consensus becomes unreachable. ⚠️ **No transform can repair that: a transform strips
-   variation, it cannot invent agreement.** Removing the key as "redundant with our own
-   dedup" would break consensus, not just dedup.
-
-Both are arguments, not test results, and should be read as such until a mainnet outcall
-has succeeded.
-
-### 2. Structural limits in PocketIC — verified, not assumed
+### 2. Structural limits in PocketIC, verified by mutation
 
 | Not covered | Why |
 |---|---|
-| **the reserve decision pairing a stale balance with a live tally** | ⚠️ **Verified by mutation that nothing caught it — and then the design removed the defect rather than testing it.** With the awaited-balance design still in place, replacing `Reserve.promisedForDecision` (since deleted) by a live-only read left the entire suite green: catching it needed a delivery continuation scheduled inside `create_order`'s balance-read gap, and PocketIC gives no way to force that ordering. The decision is now synchronous against `reserveFloor` — a maintained lower bound moved only by our own outflows — so there are no two values to pair. Scenario 72 stays as a guard on the invariant (`promisedTotal ≤ balance`), and the row stays because it is the record of how the untestable bug was closed: by deleting the pairing, not by covering it |
-| **the reserve floor adopting a balance across an in-flight outflow** | The floor's soundness rests on adoption happening only in a quiet window, and the window is established across an `await` — so reproducing the unsafe interleaving needs a transfer issued inside a reconcile's balance-read gap, which PocketIC cannot schedule on demand. What **is** covered: `test/reserve.test.mo` pins that a non-quiet observation is refused, and scenario 76 covers the failure this produced in practice — one escalated order making the window permanently unsatisfiable, which is the direction that actually shipped into the branch. ⚠️ **And the untestable direction is exactly where a second bug hid**: `Delivery.openEntry` wrote a hardcoded status instead of the order's, so the predicate matched nothing and the window was *always* satisfied. Nothing here caught it and scenario 76 passed vacuously — it was found by a test written for `pending_deliveries`, and the guard is now a unit test on the coupling (`test/delivery.test.mo`) plus comments at both ends. Read this row as: the interleaving is untestable, so the predicate's INPUTS have to be pinned instead |
-| **the delivery replay sending the intent's ORIGINAL fee** | ⚠️ **Verified by mutation that nothing catches this.** Re-reading `icrc1_fee()` on the replay path passes every Motoko assertion and the whole PocketIC suite: the unit tests pin the arithmetic (`locked - amount` recovers the fee), and the integration suite runs against a real cycles ledger whose fee has never moved. Catching it needs a fee change *inside* the 24 h dedup window. It matters because if the ledger's dedup key includes the fee, a replay after a fee change is a distinct transaction and the buyer is paid twice — so the code comment is the guard, and this row exists so its absence is not mistaken for coverage |
-| **the stored ledger fee PERSISTING after `#BadFee`** | Staging it needs the stored fee to differ from the ledger's, and there is no `set_cycles_ledger_fee` lever to make them differ — deliberately, since the only state such a lever fixes is one it can create, and a typo in it shorts buyers — the PocketIC cycles ledger's fee never moves. ⚠️ **Deliberate trade**: shipping an admin money lever to production so a test can stage a state is worse than the gap. The gap is one line (`cyclesLedgerFee := expected`) whose failure is **loud** — the fee does not stick, so `delivery.feeChanged` fires on every delivery instead of once, which RUNBOOK §8 carries as a P3 row. The ledger's report is still unit-pinned (`interpretTransfer(#Err(#BadFee))`), and scenario 74 was deleted with the lever rather than left asserting a mechanism it could no longer reach |
-| a **trapping** daily reconcile | the reconcile is detached into its own message precisely so a trap cannot stop the sweep, but nothing can inject that trap: it would take an order store large enough to exhaust the instruction limit. What *is* covered is that the detached message runs, commits, and is cadence-gated in both directions (scenario 58); the isolation itself rests on the message boundary, not on a test |
-| `stageOf`'s `#escalate` arm wiring | **No longer a gap — scenario 80 covers it**, and the row stays to record why it was one. It cited a retry budget of 2,000 sweeps as the thing that made the arm impractical to reach; there is no retry budget, and the arm's reachable reason is `staleIntent` at ~24 h, which `advanceTime` reaches in one line. The gap was a stale premise, not a real ceiling. ⚠️ **Two bounds terminate a stuck delivery and 35/47 reach only the rarer one**: both jump ~80 h at once, so no sweep lands in the 24 h–72 h window where the dedup bound fires. 80 sweeps at 25 h and asserts the stage is `staleIntent`, which is what pins the cause the runbook triages by |
+| **the reserve floor adopting a balance across an in-flight outflow** | The window is established across an `await`, so the unsafe interleaving needs a transfer issued inside a reconcile's balance-read gap, which PocketIC cannot schedule on demand. What is covered: `test/reserve.test.mo` pins that a non-quiet observation is refused, and scenario 76 covers the direction that actually shipped (one escalated order making the window permanently unsatisfiable). The predicate's inputs are pinned instead: `test/delivery.test.mo` couples `Delivery.openEntry`'s status to the order's, after a hardcoded status once made the window always satisfied and 76 pass vacuously |
+| **the delivery replay sending the intent's original fee** | Re-reading `icrc1_fee()` on the replay path passes every assertion: the integration suite runs against a real cycles ledger whose fee never moves, and catching it needs a fee change inside the 24 h dedup window. If the ledger's dedup key includes the fee, a replay after a fee change pays the buyer twice, so the code comment is the guard |
+| **the stored ledger fee persisting after `#BadFee`** | Staging it needs the stored fee to differ from the ledger's, and there is deliberately no `set_cycles_ledger_fee` lever: the only state such a lever fixes is one it can create, and a typo in it shorts buyers. The failure is loud: `delivery.feeChanged` fires on every delivery instead of once, which `RUNBOOK.md` §8 carries as a P3 row. The ledger's report is unit-pinned (`interpretTransfer(#Err(#BadFee))`) |
+| **the reserve decision pairing a stale balance with a live tally** | Closed by design rather than by test: the decision is now synchronous against `reserveFloor`, so there are no two values to pair. Scenario 72 guards the invariant `promisedTotal ≤ balance` |
+| a **trapping** daily reconcile | The reconcile is detached into its own message so a trap cannot stop the sweep, but nothing can inject that trap. What is covered is that the detached message runs, commits, and is cadence-gated in both directions (scenario 58) |
 
-### 3. The deployment layer — covered separately by `scripts/e2e-local.sh`
+### 3. The deployment layer, covered separately by `scripts/e2e-local.sh`
 
-The PocketIC suite installs wasms directly and **never runs `icp deploy`**, so
-nothing it does exercises the deploy pipeline. `scripts/e2e-local.sh` covers that
-against a real local network (`icp network start`), and is not part of
+The PocketIC suite installs wasms directly and never runs `icp deploy`.
+`scripts/e2e-local.sh` covers that against a real local network, and is not part of
 `scripts/test-all.sh` because it needs one running:
 
 | What only this can prove | Why the PocketIC suite cannot |
 |---|---|
 | the deploy pipeline: recipes, `shrink: true`, embedded `candid:service`, the Candid compatibility check | it installs wasms directly |
-| the **`PUBLIC_CANISTER_ID:xrc` override branch** | in PocketIC the mock sits *at* the mainnet id, so no env var is injected and only the fallback branch ever runs |
-| the asset canister and its `ic_env` cookie (`ic_root_key` + the canister ids) | there is no asset canister and no HTTP gateway serving it |
+| the **`PUBLIC_CANISTER_ID:xrc` override branch** | in PocketIC the mock sits *at* the mainnet id, so only the fallback branch ever runs |
+| the asset canister and its `ic_env` cookie | there is no asset canister and no HTTP gateway serving it |
 | local Internet Identity responding | `ii: true` is a network feature, not a canister one |
-| `icp.yaml` environment scoping — that `ic` lists only `backend` and `frontend`, keeping the mock off mainnet structurally | it is a config fact, not a canister behaviour |
+| `icp.yaml` environment scoping: `ic` lists only `backend` and `frontend` | a config fact, not a canister behaviour |
 
-It also reports two conditions loudly rather than papering over them, because both
-look identical from inside a deploy and only one is safe: a **breaking Candid
-change** against the deployed canister, and a **stable-shape change** whose upgrade
-traps in `register_stable_type` (EOP refusing to reinterpret existing memory).
-Locally it retries with `--yes` and `--mode reinstall`; on mainnet those are a
-migration expression and a deliberate decision.
-
-Two gotchas it encodes, both found by running it:
-
-- The **xrc mock keeps its canned response in heap and sets it from `init_args` at
-  install time**, so a routine `icp deploy` upgrades it and every later rate call
-  traps with "Response has not been set". The script reinstalls it first.
-- **`rates` stays null until the local gateway is seeded.** Caching a pair needs a
-  fresh CMC rate as well as the XRC, and the CMC's rate is settable only by NNS
-  governance. `scripts/local-dev-seed.sh` does that through the PocketIC control
-  API (see docs/SANDBOX-TESTPLAN.md), so local orders **can** be priced — the smoke
-  test just does not depend on it, because that control port is not a supported
-  `icp` interface.
+It reports two conditions loudly, because both look identical from inside a deploy: a
+breaking Candid change against the deployed canister, and a stable-shape change whose
+upgrade traps in `register_stable_type`. Locally it retries with `--yes` and
+`--mode reinstall`. Two gotchas it encodes: the xrc mock keeps its canned response in
+heap and sets it from `init_args`, so a routine `icp deploy` upgrades it and every later
+rate call traps with "Response has not been set" (the script reinstalls it first); and
+`rates` stays null until the local gateway is seeded, because the CMC's rate is settable
+only by NNS governance.
 
 ### 4. Things only a real Stripe account can show
 
-Covered by `docs/SANDBOX-TESTPLAN.md`, not by any suite:
-
-- **The real wire format.** Every payload in the repo is hand-crafted JSON written
-  from the API docs. The plan's fixture-capture step converts that into recorded
-  reality — until then, the suites prove the canister matches *our reading* of
-  Stripe.
-- Completing a **hosted Checkout page** (no headless path exists).
-- Live-mode behaviour: Radar, 3DS, payouts, account restrictions.
-- **Disputes.** Only `charge.refunded` is subscribed, so a chargeback produces no
-  on-chain signal at all — accepted and documented, managed in the Dashboard.
+Covered by `docs/SANDBOX-TESTPLAN.md`, not by any suite: the real wire format (every
+payload in the repo is hand-crafted JSON written from the API docs), completing a
+hosted Checkout page, and live-mode behaviour (Radar, 3DS, payouts, account
+restrictions).
 
 ### 5. No coverage measurement
 
-There is no instrumentation — no `c8`/istanbul for TypeScript, nothing for Motoko.
-The tables above are a qualitative map, deliberately: an unmeasured percentage
-would be worse than an honest inventory. If a number is ever wanted, `c8` on the
-frontend would be the cheapest place to start, and it would immediately report
-`main.ts` at roughly zero.
+There is no instrumentation, no `c8`/istanbul for TypeScript, nothing for Motoko. The
+tables above are a qualitative map, deliberately: an unmeasured percentage would be
+worse than an honest inventory.
 
 ## Continuous integration
 
-`.github/workflows/mops-test.yml` runs three jobs, all **verified green** on
-`ubuntu-latest`:
+`.github/workflows/mops-test.yml` runs three jobs on `ubuntu-latest`:
 
-- **motoko** — lint, unit suites, and that the committed `.did` is current
-- **frontend** — build (regenerates bindings) → typecheck → tests
-- **integration** — typecheck + the PocketIC suite
+- **motoko**: lint, unit suites, and that the committed `.did` is current
+- **frontend**: build (regenerates bindings) → typecheck → tests
+- **integration**: typecheck + the PocketIC suite (`ubuntu-latest` is a 4 KiB-page host)
 
-Triggers: `push` on `main`/`master`, `pull_request`, and `workflow_dispatch`. Note
-that a push to a **feature branch matches none of the first two** — open a PR or
-dispatch it manually.
+Triggers: `push` on `main`/`master`, `pull_request`, and `workflow_dispatch`. A push to a
+feature branch matches none of the first two: open a PR or dispatch it manually.
 
-The `integration` job needs a 4 KiB-page host, which `ubuntu-latest` satisfies (the
-IC replica hard-asserts 4096-byte pages).
-
-⚠️ **`npm ci` mismatches in `test/integration` cannot be reproduced on macOS.** The
-first run of this job failed on Linux-only optional dependencies (`@emnapi/*`, pulled
-in through vitest's rolldown wasm fallback) that a macOS resolve never records — so a
-local `npm ci` passes while CI fails. If that job fails on install, delete
-`test/integration/package-lock.json` and `node_modules` and resolve fresh; an
-incremental `npm install` only narrows the gap. CI is the only test for it.
+⚠️ **`npm ci` mismatches in `test/integration` cannot be reproduced on macOS.** Linux-only
+optional dependencies (`@emnapi/*`, through vitest's rolldown wasm fallback) are never
+recorded by a macOS resolve, so a local `npm ci` passes while CI fails. If that job
+fails on install, delete `test/integration/package-lock.json` and `node_modules` and
+resolve fresh. CI is the only test for it.
