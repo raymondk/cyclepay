@@ -106,6 +106,8 @@ Then buy: pick an amount, pay with `4242 4242 4242 4242`, and the order walks
 
 - ⚠️ **Run the seed before `stripe-dev.sh`.** The latter refuses to start if the gateway
   cannot price.
+- **No browser where the CLI runs?** `docs/STRIPE.md` §15 has the pairing-code login
+  and the Linux install; the checkout URL itself can be paid from any device.
 - ⚠️ **Step 4 is the one nobody guesses.** With an empty allow-list every purchase
   refuses with `unboundedGiveaway`, the faucet guard. The seed prints the exact command.
 - ⚠️ **Step 5 needs a restricted key** (`rk_...`) with **Checkout Sessions = Write** and

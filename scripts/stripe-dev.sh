@@ -280,4 +280,13 @@ Two things to expect locally:
 Starting the forwarder (Ctrl-C to stop)...
 NOTES
 
-exec env -u STRIPE_API_KEY stripe listen --forward-to "$FORWARD_URL"
+# Stripe CLI 1.53 refuses `listen` without an event selection ("must specify events to
+# forward using --events, --all-snapshot, or --all-thin"), and the forwarder exited 0
+# right after the secret was wired, so a sandbox payment reached nothing and nothing
+# said why. The list is read from the handlers rather than written here, so an event
+# the canister starts handling is forwarded without anyone remembering this line.
+EVENTS="$(grep -rhoE '"(checkout\.session|charge)\.[a-z_.]+"' \
+  src/backend/rails/Card.mo src/backend/mixins/Webhook.mo | tr -d '"' | sort -u | paste -sd, -)"
+[ -n "$EVENTS" ] || die "could not read the handled Stripe event types from src/backend"
+echo "forwarding:  $EVENTS"
+exec env -u STRIPE_API_KEY stripe listen --events "$EVENTS" --forward-to "$FORWARD_URL"
