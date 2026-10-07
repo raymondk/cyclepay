@@ -21,13 +21,17 @@ import {
 ///
 /// and look at the new PNGs before committing them.
 ///
-/// ⚠️ **Baselines are LINUX-ONLY, and these tests skip on any other platform.**
-/// Playwright suffixes per platform because font rasterisation differs, so a
-/// darwin set was committed alongside — and it bought a signal for a rasteriser
-/// nothing ships on, at a second set to regenerate on every deliberate change.
-/// Worse, a Mac cannot repair the `-linux` half that CI actually compares against
-/// (see below), so the darwin half could never substitute for it. Linux-only makes
-/// every failure reproducible where it is checked.
+/// ⚠️ **Baselines are compared on the CI runner ONLY, and these tests skip
+/// everywhere else.** Playwright suffixes per platform because font rasterisation
+/// differs, so a darwin set was once committed alongside — and it bought a signal for
+/// a rasteriser nothing ships on, at a second set to regenerate on every deliberate
+/// change. A Linux developer machine is not the runner either: the same `-linux`
+/// baselines CI passes byte-for-byte differ by a few thousand antialiasing pixels
+/// under a locally installed chromium-headless-shell, so a Linux-only skip still
+/// failed the local gate on four shots the runner accepts. The skip is keyed on `CI`,
+/// which the runner sets and a workstation does not, so a failure is reproducible
+/// where it is checked and a local run never reports green against a baseline it
+/// cannot reproduce.
 ///
 /// **The `-linux` set has to come from the CI runner itself.** Generating it in
 /// `mcr.microsoft.com/playwright:v1.62.1-noble` at `--platform linux/amd64` —
@@ -69,11 +73,12 @@ async function settleForShot(page: import("@playwright/test").Page): Promise<voi
 const shot = { animations: "disabled", fullPage: true } as const;
 
 test.describe("visual baselines", () => {
-  // ⚠️ Linux-only: the committed baselines come from the CI runner, and comparing a
-  // macOS rasteriser against them produced ~2,400 differing pixels of pure antialiasing.
-  // Skipping is honest about where this coverage lives; a local run reporting green
-  // against a baseline it cannot reproduce would not be.
-  test.skip(process.platform !== "linux", "baselines are generated on the CI runner");
+  // ⚠️ CI-only: the committed baselines come from the CI runner. A macOS rasteriser
+  // produced ~2,400 differing pixels of pure antialiasing against them, and a Linux
+  // workstation's chromium build failed four shots the runner passes. Skipping is honest
+  // about where this coverage lives; a local run reporting green against a baseline it
+  // cannot reproduce would not be. Set CI=1 locally only to reproduce a runner failure.
+  test.skip(!process.env.CI, "baselines are compared on the CI runner (CI=1)");
 
   test("the landing view, light", async ({ page }) => {
     await page.goto("/");

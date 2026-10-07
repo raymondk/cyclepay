@@ -245,7 +245,9 @@ npm --prefix test/integration test           # PocketIC scenarios — the go-liv
 
 - ⚠️ **No frontend change is done on a jsdom pass alone.** jsdom has no cascade and no
   layout, so `el.hidden` reads true for an element a class selector keeps on screen. The
-  browser suite is not optional and the gate fails outright if it cannot run. Surfaces
+  browser suite is not optional and the gate fails outright if it cannot run. Its
+  screenshot baselines compare only on the CI runner (`CI=1`): the committed pixels
+  come from that runner's rasteriser, so `visual.spec.ts` skips everywhere else. Surfaces
   that need a session or a delivered order are reachable through the test-only fixture
   hook (`src/frontend/src/fixtures.ts`); see `test/browser/delivered.spec.ts`.
 - ⚠️ **`npm test`, never `npx vitest run`, for the integration suite.** The latter skips

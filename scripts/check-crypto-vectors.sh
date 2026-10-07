@@ -133,15 +133,25 @@ for pkg in bls12-381 vetkeys; do
 
   ( cd "$DIR" && mops install ) >/dev/null 2>&1 || fail "mops install failed for $pkg under moc $OURS"
 
-  OUT="$( ( cd "$DIR" && mops test ) 2>&1 )" || {
+  # `-r verbose`, not the default reporter. The default's summary line depends on
+  # the mops CLI version: 3.x prints "passed N" with N the number of TESTS, 2.13
+  # prints "passed N files" — and 14 files parsed as 14 vectors failed this gate on a
+  # machine whose CI was green. The verbose reporter prints one ✓ per test and a
+  # per-test "passed N" on both, so it is the one line that means the same thing
+  # everywhere.
+  OUT="$( ( cd "$DIR" && mops test -r verbose ) 2>&1 )" || {
     printf '%s\n' "$OUT" >&2
     fail "crypto vectors FAILED in $pkg under moc $OURS — do not ship a secret through this"
   }
-  # `mops test` prints "Done in Xs, passed N". Pull N out so the gate reports coverage
-  # rather than a bare tick: a suite that silently stopped collecting tests would
-  # otherwise pass here looking identical to one that ran.
-  N="$(printf '%s' "$OUT" | sed -nE 's/.*passed ([0-9]+).*/\1/p' | tail -1)"
-  [ -n "$N" ] && [ "$N" -gt 0 ] 2>/dev/null || fail "could not read a passing test count from $pkg"
+  # Pull N out so the gate reports coverage rather than a bare tick: a suite that
+  # silently stopped collecting tests would otherwise pass here looking identical to
+  # one that ran. A summary that still counts files ("passed N files") is refused
+  # rather than misread; the ✓ lines are the fallback count for that case.
+  N="$(printf '%s\n' "$OUT" | sed -nE 's/.*passed ([0-9]+)[[:space:]]*$/\1/p' | tail -1)"
+  if [ -z "$N" ]; then
+    N="$(printf '%s\n' "$OUT" | grep -c '✓' || true)"
+  fi
+  [ -n "$N" ] && [ "$N" -gt 0 ] 2>/dev/null || fail "could not read a per-test passing count from $pkg (mops $(mops --version 2>/dev/null | head -1))"
   if [ "$THEIRS" = "$OURS" ]; then
     printf '   %-12s %3s vectors against the Rust reference (moc %s)\n' "$pkg" "$N" "$OURS"
   else
