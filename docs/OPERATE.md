@@ -434,7 +434,9 @@ icp canister call backend stripe_api_key_status '()' -e ic   # isSet = true, gen
 
 ```bash
 # Where the BUYER returns after paying. Validated: https, no query, no fragment.
-# success_url becomes `<origin>/#/order/<id>`, and the app routes on the hash.
+# success_url becomes `<origin>/#/paid/<id>` (cancel_url `#/unpaid/<id>`), and the app
+# routes on the hash.
+
 icp canister call backend set_stripe_origin '("https://cyclepay.raymondk.co")' \
   -e ic --identity <operator>
 icp canister call backend stripe_origin '()' -e ic

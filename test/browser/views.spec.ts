@@ -42,6 +42,43 @@ test.describe("view routing", () => {
     await expect(page.locator("#view-landing")).toBeVisible();
   });
 
+  // Where Stripe sends the buyer back. The browser that arrives may not own the order
+  // (a CLI identity can be the buyer), and the backend here is unreachable on purpose,
+  // so this is the harshest version of that arrival: no session, no answer.
+  test("a paid return renders the outcome with no session and no backend", async ({ page }) => {
+    await page.goto("/#/paid/deadbeefdeadbeefdeadbeefdeadbeef");
+    await expect(page.locator("#view-return")).toBeVisible();
+    await expect(page.locator("#return-headline")).toHaveText(/payment received/i);
+    await expect(page.locator("#return-next")).toContainText(/terminal/i);
+    // The offer to sign in is for a web buyer whose session was lost: visible, not
+    // merely un-hidden, which is the whole reason this runs in a browser.
+    await expect(page.locator("#return-sign-in")).toBeVisible();
+    await expect(page.locator("#order-missing")).toBeHidden();
+    await expect(page.locator("#active-order")).toBeHidden();
+    await expect(page.locator("#view-landing")).toBeHidden();
+  });
+
+  test("an unpaid return says nothing was charged", async ({ page }) => {
+    await page.goto("/#/unpaid/deadbeefdeadbeefdeadbeefdeadbeef");
+    await expect(page.locator("#view-return")).toBeVisible();
+    await expect(page.locator("#return-headline")).toHaveText(/not completed/i);
+    await expect(page.locator("#return-detail")).toContainText(/nothing was charged/i);
+  });
+
+  test("the owner is handed on to the order page", async ({ page }) => {
+    await page.goto("/");
+    await signInAsFixtureBuyer(page);
+    await openFixtureOrder(page, { status: "paid" });
+    await expect(page.locator("#active-order")).toBeVisible();
+    // Arrive from Stripe as the owner: the return page defers to the order view.
+    await page.evaluate(() => {
+      window.location.hash = "#/paid/f1c7ea0b9d2e4a6580b3c1d7e9f20a4b";
+    });
+    await expect(page).toHaveURL(/#\/order\/f1c7ea0b9d2e4a6580b3c1d7e9f20a4b$/);
+    await expect(page.locator("#active-order")).toBeVisible();
+    await expect(page.locator("#view-return")).toBeHidden();
+  });
+
   // Two different reasons for the same absence, and the old single spec could not
   // tell them apart: it asserted "hidden while signed out with no orders", which
   // passes if the link is hidden for either reason, or for a third one nobody

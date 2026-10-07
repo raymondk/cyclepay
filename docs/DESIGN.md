@@ -521,6 +521,24 @@ Two costs of mixins:
    that each guarded method still calls the guard its tier declares.
    `check-endpoint-docs.py`, `check-admin-tiers.py` and a tag diff cover those.
 
+## §10 — The buyer's channel is not the browser
+
+**Ownership is channel-agnostic.** §2 makes authz `caller == order.owner` and nothing
+more: any non-anonymous principal may create an order for its own cycles-ledger
+account, and a plain CLI identity (`icp identity`) is as valid a buyer as an Internet
+Identity session. That is the model that lets a developer fund the identity that runs
+`icp deploy` without first linking their CLI to a web identity.
+
+**So the browser Stripe redirects to may not own the order.** `get_order` is
+owner-scoped and answers nothing to anyone else, and a return URL that landed on the
+order page told a paying CLI buyer their order could not be found. The two return URLs
+are therefore their own routes, `#/paid/<id>` and `#/unpaid/<id>` (`rails/Session.mo`,
+`view.ts`): the page states the outcome from the route alone, with no lookup it could
+fail, and if the viewer does turn out to own the order it hands them on to the order
+page, so a web buyer sees exactly what they saw before. Stripe only redirects to
+`success_url` after payment, so the route is evidence enough of the outcome; the status
+it does not know is delivery, which it says is in progress where the purchase started.
+
 ## §11 — Deferred
 
 A second rail, M-of-N or SNS governance, an external audit of the delivery and
