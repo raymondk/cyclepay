@@ -1,0 +1,635 @@
+#!/usr/bin/env bash
+# Make a local network's gateway actually usable: rate, tiers, delivery timeline,
+# and a funded cycles reserve.
+#
+# A freshly deployed gateway is **fail-closed by design** — no tiers, an empty
+# cycles reserve, and (locally) no exchange rate. That is correct for production and
+# indistinguishable from "broken" when you are trying to click through the app,
+# where it shows as "No amounts are configured yet" and "No exchange rate
+# available yet".
+#
+# ## The part that is not obvious: the CMC rate
+#
+# Pricing needs BOTH rates. The XRC comes from the local mock (icp.yaml), but the
+# CMC's conversion rate is only settable by NNS **governance**, and no local
+# identity is governance. Docs in this repo previously called that a hard local
+# blocker.
+#
+# It is not: a local `icp network` IS a PocketIC instance, and PocketIC's control
+# API — on a second port of the same process — can submit an ingress message from
+# an arbitrary sender. That is what this script does.
+#
+# ⚠️ That control port is **not a supported `icp` interface.** It is unpublished
+# and may move or disappear between icp-cli releases. This script discovers it
+# from the running process rather than assuming, and fails with an explanation
+# rather than a stack trace. Nothing in CI or the test gate depends on it; the
+# PocketIC suite drives its own instance through the supported pic-js API.
+#
+# ## The rate goes stale after 15 minutes
+#
+# `Cmc.cmcRateMaxAgeNs` is a security control, not a tuning knob. Re-run this
+# script (or just `--rate-only`) whenever the app starts refusing orders again.
+#
+# Usage:
+#   scripts/local-dev-seed.sh              # everything
+#   scripts/local-dev-seed.sh --rate-only  # just refresh the CMC rate
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+RATE_ONLY=0
+[ "${1:-}" = "--rate-only" ] && RATE_ONLY=1
+if [ -n "${1:-}" ] && [ "$1" != "--rate-only" ]; then
+  echo "usage: $0 [--rate-only]" >&2
+  exit 2
+fi
+
+XDR_PERMYRIAD=35000        # 3.5 XDR/ICP, matching the PocketIC suite's vector
+
+ok() { printf '  \033[32m✓\033[0m %s\n' "$1"; }
+step() { printf '\n\033[1m── %s\033[0m\n' "$1"; }
+die() {
+  printf '\n\033[31m✗ %s\033[0m\n' "$1" >&2
+  exit 1
+}
+
+icp network status >/dev/null 2>&1 || die "no local network. Run: icp network start -d && icp deploy"
+
+# ── the PocketIC control port ────────────────────────────────────────────────
+step "PocketIC control API"
+# Same process as the gateway, second listening port. Discovered, never assumed.
+GATEWAY_PORT="$(icp network status --json | jq -r '.gateway_url' | sed -E 's#.*:([0-9]+)/?$#\1#')"
+[ -n "$GATEWAY_PORT" ] || die "could not read a gateway port from icp network status"
+# The process SERVING THIS GATEWAY, not just any pocket-ic. `pgrep -f pocket-ic |
+# head -1` picked whichever instance started first, so with a second local network
+# running anywhere on the machine — another project, or a stale one — the CMC
+# message went to the wrong instance and this script failed with "the CMC did not
+# take the rate" while the rate had in fact been set on someone else's network.
+PIC_PID="$(lsof -nP -iTCP:"$GATEWAY_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
+[ -n "$PIC_PID" ] || die "nothing is listening on the gateway port :$GATEWAY_PORT. Run: icp network start -d"
+CONTROL_PORT="$(lsof -nP -iTCP -sTCP:LISTEN -a -p "$PIC_PID" 2>/dev/null |
+  awk '{print $9}' | grep -oE '[0-9]+$' | grep -v "^${GATEWAY_PORT}$" | head -1 || true)"
+[ -n "$CONTROL_PORT" ] || die "could not find the PocketIC control port beside the gateway on :$GATEWAY_PORT.
+    This port is unpublished and may have changed in a newer icp-cli. Everything
+    below except the CMC rate can still be done by hand — see RUNBOOK §§3-5."
+ok "control API on 127.0.0.1:$CONTROL_PORT (gateway on :$GATEWAY_PORT)"
+
+# ── the XRC mock ─────────────────────────────────────────────────────────────
+step "XRC mock"
+# It keeps its canned response in HEAP and sets it from `init_args` at INSTALL
+# time, so any routine `icp deploy` upgrades it and the response is gone. Every
+# later rate fetch then fails with "Response has not been set", which surfaces as
+# "No exchange rate available" — indistinguishable from the CMC problem below and
+# the reason this script exists at all. Reinstalling is free: it holds nothing.
+icp deploy --mode reinstall --yes xrc >/dev/null 2>&1 ||
+  die "could not reinstall the xrc mock. Is it in icp.yaml and fetched? Try:
+    npm --prefix test/integration run fetch:wasm"
+ok "xrc mock reinstalled (its response does not survive an upgrade)"
+
+# ── the CMC rate ─────────────────────────────────────────────────────────────
+step "CMC conversion rate (as governance)"
+# node needs @icp-sdk/core on its resolution path, which lives in test/integration.
+( cd test/integration && node --input-type=module -e "
+import { IDL } from '@icp-sdk/core/candid';
+import { Principal } from '@icp-sdk/core/principal';
+const CONTROL = 'http://127.0.0.1:${CONTROL_PORT}';
+const Payload = IDL.Record({
+  data_source: IDL.Text, timestamp_seconds: IDL.Nat64, xdr_permyriad_per_icp: IDL.Nat64,
+  reason: IDL.Opt(IDL.Variant({ OldRate: IDL.Null, DivergedRate: IDL.Null, EnableAutomaticExchangeRateUpdates: IDL.Null })),
+});
+const b64 = (u8) => Buffer.from(u8).toString('base64');
+const body = {
+  sender: b64(Principal.fromText('rrkah-fqaaa-aaaaa-aaaaq-cai').toUint8Array()),
+  canister_id: b64(Principal.fromText('rkp4c-7iaaa-aaaaa-aaaca-cai').toUint8Array()),
+  method: 'set_icp_xdr_conversion_rate',
+  payload: b64(new Uint8Array(IDL.encode([Payload], [{
+    data_source: 'local-dev-seed',
+    timestamp_seconds: BigInt(Math.floor(Date.now() / 1000)),
+    xdr_permyriad_per_icp: ${XDR_PERMYRIAD}n,
+    reason: [],
+  }]))),
+  effective_principal: 'None',
+};
+// PocketIC answers 409 with the operation currently in flight: this is a LIVE
+// network with its own auto-tick loop, so a request from outside routinely
+// races it. pic-js retries internally; a hand-rolled client has to as well, or
+// it works once and then fails for a reason that looks like a bad endpoint.
+const post = async (p, payload) => {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const r = await fetch(CONTROL + '/instances/0' + p, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (r.status !== 409) return { status: r.status, body: text };
+    await new Promise((res) => setTimeout(res, 150));
+  }
+  return { status: 409, body: 'still busy after 40 attempts' };
+};
+const s = await post('/update/submit_ingress_message', body);
+if (s.status !== 200) { console.error('submit failed', s.status, s.body.slice(0,300)); process.exit(1); }
+const a = await post('/update/await_ingress_message', JSON.parse(s.body).Ok);
+if (a.status !== 200) { console.error('await failed', a.status, a.body.slice(0,300)); process.exit(1); }
+// DECODE the CMC's reply. HTTP 200 only means PocketIC delivered the message;
+// the CMC can still answer Err, and treating 200 as success reported a rate that
+// was never set and left the gateway unable to price.
+
+" ) || die "could not set the CMC rate through the PocketIC control API on :$CONTROL_PORT"
+# HTTP 200 only means PocketIC delivered the message; the CMC can still refuse it.
+# Ask the CMC what it now holds instead of decoding the reply — this checks the
+# thing we actually depend on, and it caught a fresh network where the rate never
+# landed and the CMC was still serving its hardcoded 2021 default.
+STORED="$(icp canister call rkp4c-7iaaa-aaaaa-aaaca-cai get_icp_xdr_conversion_rate '()' 2>/dev/null |
+  grep -oE 'xdr_permyriad_per_icp = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || echo 0)"
+STAMP="$(icp canister call rkp4c-7iaaa-aaaaa-aaaca-cai get_icp_xdr_conversion_rate '()' 2>/dev/null |
+  grep -oE 'timestamp_seconds = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || echo 0)"
+if [ "$STORED" != "$XDR_PERMYRIAD" ]; then
+  die "the CMC did not take the rate: it still reports $STORED permyriad, stamped $STAMP
+    (its hardcoded default is 35200 stamped 1620633601, i.e. 10 May 2021).
+    The submit reached PocketIC, so this is the CMC refusing the proposal rather
+    than a transport problem."
+fi
+ok "CMC rate set to ${XDR_PERMYRIAD} permyriad XDR/ICP (stamped $STAMP)"
+
+icp canister call backend refresh_rates '()' >/dev/null 2>&1 || true
+
+# Assert a real QUOTE, not the presence of a cached pair. `rates = opt` survives a
+# failed refresh and a pair too old to use, so grepping for it reported success on
+# a gateway that refused every purchase — the same mistake the rate line in the UI
+# was making.
+# $10, the smallest amount the gate now admits — quoting below the floor would
+# "work" here (quote_previews is a pure quote and does not gate) and then be
+# refused at create_order, which is a confusing thing for a seed to report as OK.
+QUOTE="$(icp canister call backend quote_previews '(vec { 1_000 : nat })' 2>&1)"
+if ! printf '%s' "$QUOTE" | grep -q 'cycles = opt'; then
+  printf '\n\033[31m✗ the gateway still cannot price a $10 purchase.\033[0m\n' >&2
+  icp canister call backend pricing_status '()' 2>&1 | grep -E 'ok = |detail = ' >&2
+  exit 1
+fi
+ok "a \$10 purchase quotes (both XRC and CMC answered)"
+
+if [ "$RATE_ONLY" -eq 1 ]; then
+  printf '\n\033[32m✓ rate refreshed\033[0m — it goes stale again in 15 minutes.\n'
+  exit 0
+fi
+
+# ── local dev config ─────────────────────────────────────────────────────────
+# `scripts/.local-dev.env` is gitignored, so a value set there is set once instead
+# of exported into every new shell — and it stays out of shell history, `ps` and
+# any terminal transcript, which matters for `STRIPE_API_KEY`.
+# ⚠️ The only variable anything reads from it is STRIPE_API_KEY.
+DEV_ENV_FILE="scripts/.local-dev.env"
+if [ -f "$DEV_ENV_FILE" ]; then
+  BEFORE_KEY="${STRIPE_API_KEY:-}"
+  # shellcheck disable=SC1090
+  . "$DEV_ENV_FILE"
+  # The environment wins over the file, so a one-off export still overrides it.
+  [ -z "$BEFORE_KEY" ] || STRIPE_API_KEY="$BEFORE_KEY"
+  ok "read local dev config from $DEV_ENV_FILE"
+fi
+
+# ── presets ──────────────────────────────────────────────────────────────────
+step "card presets"
+# ⚠️ An empty list is NO LONGER a pause lever: a custom amount is orderable
+# without any preset, so an empty list just shows no tiles. The rail's switch is
+# both Stripe secrets being provisioned.
+#
+# The presets are $10 / $20 / $50. ⚠️ **Nothing below $10**: the gate's floor is $10, and
+# registering a cheaper tier is refused as `belowFloor`.
+icp canister call backend set_card_tiers \
+  '(vec { record { id = "t10"; usdCents = 1_000 : nat };
+          record { id = "t20"; usdCents = 2_000 : nat };
+          record { id = "t50"; usdCents = 5_000 : nat } })' \
+  >/dev/null || die "set_card_tiers failed"
+ok "3 presets (\$10 / \$20 / \$50); any amount from \$10 to \$100 is orderable"
+
+# ── delivery timeline ────────────────────────────────────────────────────────
+step "delivery timeline"
+# The gateway ships with a 2 h alert and a 72 h terminate bound, which is what you
+# want locally too — an order that cannot deliver should end up on the worklist
+# rather than retrying in silence. Set explicitly so the seed states the numbers a
+# reader will see in `orphans_unresolved`.
+icp canister call backend set_delivery_config \
+  '(record { maxHoldNs = 259_200_000_000_000 : int;
+             alertAfterNs = 7_200_000_000_000 : int })' \
+  >/dev/null || die "set_delivery_config failed"
+ok "2 h alert, 72 h max hold"
+
+
+# ── the admission gate ───────────────────────────────────────────────────────
+# ── Stripe API key + return origin ─────────────────────────────────────
+step "Stripe session config"
+# ⚠️ **`STRIPE_API_KEY` belongs in `scripts/.local-dev.env`, not on a command
+# line.** That file is gitignored and is sourced above, so the key never appears
+# in your shell history, in `ps` output, or in a terminal transcript. An
+# `export`-then-run also works and wins over the file, but it leaves the value
+# where something can read it back.
+#
+#   echo 'STRIPE_API_KEY=rk_test_...' >> scripts/.local-dev.env
+# The rail is live only when BOTH the API key and the webhook secret are
+# provisioned. This step does the KEY and the ORIGIN; `scripts/stripe-dev.sh`
+# does the webhook secret, because that one belongs to a `stripe listen` session
+# rather than to the deployment.
+#
+# ⚠️ A reinstall wipes both secrets and this script only restores the key, so
+# after `--mode reinstall` you still need `scripts/stripe-dev.sh` before paying.
+if [ -n "${STRIPE_API_KEY:-}" ]; then
+  # Sealed. `seal-secret.sh` reads STRIPE_API_KEY itself, from the environment or
+  # from scripts/.local-dev.env, so the value is never passed as an argument.
+  scripts/seal-secret.sh api-key >/dev/null \
+    || die "sealed set_stripe_api_key was refused (too short, or not a controller?)"
+  ok "Stripe API key provisioned from STRIPE_API_KEY, sealed"
+else
+  # A placeholder, deliberately: it lets every non-paying path work — browsing,
+  # signing in, quoting — while `create_order` fails at the outcall with a real
+  # Stripe 401 rather than at a config check. That is a better local default than
+  # refusing to create orders at all, and the failure names itself.
+  # Sealed like the real thing, so the placeholder path exercises the same code —
+  # a local default that skipped sealing would leave the decrypt path untested until the
+  # first operator with a real key.
+  STRIPE_API_KEY='rk_test_PLACEHOLDER_set_STRIPE_API_KEY_to_create_sessions' \
+    scripts/seal-secret.sh api-key >/dev/null \
+    || die "sealed set_stripe_api_key was refused"
+  # ⚠️ **Say the TRUE reason, and scope the hazard correctly.** An earlier version of this
+  # message asserted that exporting the key makes `stripe listen` die with
+  # "more_permissions_required". It does not: every `stripe` invocation in this repo's own
+  # scripts is wrapped `env -u STRIPE_API_KEY` (stripe-dev.sh:156/164/282,
+  # capture-stripe-fixtures.sh:78/112), so our forwarder is immune. The real exposure is a
+  # `stripe` command an operator types by hand — `capture-stripe-fixtures.sh` prints one
+  # for exactly that — and the durable reason for the file is the one below.
+  printf '  \033[33m!\033[0m placeholder API key set — no real Checkout Session can be created.\n'
+  printf '     Put it in the FILE, not your shell:\n'
+  printf '       echo '"'"'STRIPE_API_KEY=rk_...'"'"' >> %s\n' "$DEV_ENV_FILE"
+  printf '     Restricted key, Checkout Sessions = Write, everything else None.\n'
+  printf '     Why the file: it is sourced into this process, so the key stays out of your\n'
+  printf '     shell history, `ps` and any terminal transcript.\n'
+  printf '     ⚠️ If you DO export it, a `stripe` command you type yourself picks it up and\n'
+  printf '        fails 403 "more_permissions_required" — a restricted key cannot open a CLI\n'
+  printf '        session. This repo'"'"'s own scripts strip it and are unaffected.\n'
+fi
+
+# The origin Stripe returns the buyer to: the LOCAL gateway, so the post-payment
+# redirect lands on the page you are clicking through.
+#
+# This was `https://<frontend-id>.icp.net` because the canister refused non-https — a
+# mainnet-shaped URL for a canister that only exists locally, so paying dead-ended the
+# browser. `Session.validateOrigin` now accepts http for loopback hosts, which is what
+# Stripe's own quickstart uses (`success_url` is a browser redirect target; Stripe never
+# fetches it). Delivery never depended on this — the webhook does that work — but the
+# redirect did.
+#
+# ⚠️ Not a chosen domain, just the one that works locally.
+ORIGIN="http://frontend.local.localhost:${GATEWAY_PORT}"
+icp canister call backend set_stripe_origin "(\"${ORIGIN}\")" >/dev/null \
+  || die "set_stripe_origin refused ${ORIGIN} — https, or loopback http, with no query or fragment"
+ok "return origin set to ${ORIGIN}"
+
+step "admission gate"
+# The one that is genuinely confusing: `minCanisterCycles` defaults to 5 T, and
+# `icp deploy` creates the canister with less. So a freshly deployed local gateway
+# refuses EVERY purchase with "temporarily unavailable while the gateway is
+# topped up" — which reads as a problem with what it sells and is actually about
+# the canister's own gas.
+#
+# Fix the CONDITION, not the gate: top the canister up, which is exactly what you
+# would do on mainnet. `icp canister top-up` (icp-cli 1.2.0) does this; it is not
+# `icp cycles transfer`, which credits the cycles LEDGER and is a different thing.
+#
+# This used to lower `minCanisterCycles` to 0.5 T instead. That works, and it is
+# the wrong lever twice over: it moves a safety floor to accommodate an
+# under-funded canister, and it means local development never exercises a gate
+# that is load-bearing on mainnet.
+CYCLES_TOP_UP=20t
+# ⚠️ **stderr is NOT redirected, and that is the fix rather than an oversight.** This
+# line used to end `>/dev/null 2>&1` with a `die` that asserted "needs icp-cli 1.2.0 or
+# newer" — a guess that was WRONG on a machine running 1.3.0, where the real error was
+# `Insufficient cycles. Requested: 20_000_000_000_000, balance: 13997200000000` after a
+# few reinstalls had spent the local identity's balance. Hiding the reason and printing
+# a hardcoded cause sends the operator to upgrade a tool that was already current.
+#
+# Same fault as `capture-stripe-fixtures.sh`'s preflight before it was fixed: a swallowed
+# stderr plus a guessed diagnosis is worse than no diagnosis, because it is believed.
+# ⚠️ **Skipped when the canister already clears the floor with room, because this script
+# is meant to be RE-RUN.** The top-up is 20 T every time, so re-seeding drained the local
+# identity by 20 T a run — two runs and `icp cycles mint` was needed again. Nothing about
+# a canister at 200 T needs another 20.
+NEED_TOP_UP=1
+PRE_CYCLES="$(icp canister call backend cycles_status '()' 2>/dev/null || true)"
+PRE_BALANCE="$(printf '%s' "$PRE_CYCLES" | grep -oE 'balance = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || echo 0)"
+PRE_FLOOR="$(printf '%s' "$PRE_CYCLES" | grep -oE 'floor = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || echo 0)"
+# Twice the floor: enough headroom that a purchase is admitted and the next run is a no-op.
+if [ "${PRE_BALANCE:-0}" -gt "$(( ${PRE_FLOOR:-0} * 2 ))" ] && [ "${PRE_FLOOR:-0}" -gt 0 ]; then
+  NEED_TOP_UP=0
+  ok "canister holds $((PRE_BALANCE / 1000000000000)) T against a $((PRE_FLOOR / 1000000000000)) T floor; no top-up needed"
+fi
+if [ "$NEED_TOP_UP" -eq 1 ] && ! TOP_UP_OUT="$(icp canister top-up backend --amount "$CYCLES_TOP_UP" 2>&1)"; then
+  printf '\n%s\n\n' "$TOP_UP_OUT" >&2
+  die "could not top up the backend canister with $CYCLES_TOP_UP cycles — the reason is printed above.
+    If it says Insufficient cycles, the local identity is spent: \`icp cycles mint --icp 5\`
+    converts more, or stop and start the network for freshly seeded principals."
+fi
+
+step "buyer allow-list"
+# ⚠️ **A local gateway with a funded reserve and no allow-list REFUSES every
+# buyer**, and the reason is not obvious from the refusal alone. The gate calls
+# that state `unboundedGiveaway`: Stripe test payments are free and unlimited, so
+# accepting them against a funded reserve with nobody listed is a cycles faucet.
+# The canister refuses rather than warns.
+#
+# The catch locally: the buyer is a browser identity from the local Internet
+# Identity, and its principal does not exist until someone signs in — so this
+# script cannot know it. Two ways through:
+#
+#   1. Pass it in:  BUYER_PRINCIPAL=<principal> scripts/local-dev-seed.sh
+#   2. Sign in first, then run the command this step prints.
+#
+# Declaring the sandbox mode is separate and unconditional: a local deployment
+# uses a Stripe TEST key, so `?false` is simply true here. It is also what makes a
+# simulation divisor settable at all (`set_pricing_config` refuses one unless the
+# mode is exactly `?false`), and it turns the webhook's livemode gate from
+# "accept either" into a real check.
+icp canister call backend set_expected_livemode '(opt false)' >/dev/null \
+  || die "set_expected_livemode was refused"
+ok "declared test mode (expect_livemode = ?false)"
+
+if [ -n "${BUYER_PRINCIPAL:-}" ]; then
+  ALLOW_OUT="$(icp canister call backend add_allowed_buyer "(principal \"${BUYER_PRINCIPAL}\")" 2>&1)" || true
+  case "$ALLOW_OUT" in
+    *already*) ok "buyer already allow-listed: $BUYER_PRINCIPAL" ;;
+    *ok*)      ok "allow-listed buyer $BUYER_PRINCIPAL" ;;
+    *)         printf '  \033[33m!\033[0m add_allowed_buyer was refused: %s\n' "$ALLOW_OUT" ;;
+  esac
+else
+  printf '  \033[33m!\033[0m no BUYER_PRINCIPAL given, so NOBODY can buy yet.\n'
+  printf '      Sign in at the local frontend, copy the principal it shows, then:\n'
+  printf '        icp canister call backend add_allowed_buyer %s\n' "'(principal \"<your-principal>\")'"
+  printf '      Until then every create_order refuses with unboundedGiveaway.\n'
+fi
+
+step "cycles reserve"
+# Delivery is a TRANSFER out of the gateway's own cycles-ledger account. So the
+# gateway needs cycles in that account, and it is a different pot from the gas balance
+# topped up above — the comment there spells out the distinction, and this is the
+# other half of it.
+#
+# `icp cycles transfer` is the mainnet procedure too: nothing creates cycles here, and
+# there is deliberately no `mint_reserve` — it would mean holding ICP and an
+# ICP-ledger dependency for one operator convenience.
+#
+# ⚠️ **Read the id here, where it is used.** Reading it in an earlier section that a
+# later change deletes leaves this line on an unbound variable, which `set -u` turns
+# into a hard stop three quarters of the way through the seed — after rates and tiers
+# are already configured. That has happened; nothing catches it but running the seed.
+BACKEND_ID="$(icp canister status backend --json | jq -r '.id')"
+[ -n "$BACKEND_ID" ] && [ "$BACKEND_ID" != "null" ] ||
+  die "could not read the backend canister id — is the network up and the canister deployed?"
+RESERVE_TOP_UP=100t
+# ⚠️ **Capture the reason, do not discard it.** This was `>/dev/null 2>&1`, so the
+# warning below could only say "could not fund the cycles reserve" — and the actual
+# message (`Insufficient cycles. Requested: 100_000_000_000_000, balance: …`) is the
+# one thing that tells an operator whether to mint more or fix something. Third
+# instance of the swallowed-reason pattern in this file, which is the file whose whole
+# job is printing guidance.
+RESERVE_OUT=""
+RESERVE_TOPPED_UP=1
+# ⚠️ Initialised HERE, not only inside the failure branch. It is read further down, and
+# being bound today depends on the `&&` conjunct order short-circuiting — reorder that
+# chain and `set -u` hard-stops three quarters of the way through the seed, which is the
+# hazard this file already documents above.
+RESERVE_OBSERVED=0
+RESERVE_OBSERVED_BALANCE=""
+if RESERVE_OUT="$(icp cycles transfer "$RESERVE_TOP_UP" "$BACKEND_ID" 2>&1)"; then
+  # ⚠️ **A funded reserve is not a SELLABLE reserve until the gateway looks.** Solvency
+  # is decided against a maintained lower bound on this account, and that bound only ever
+  # rises by observation: it starts at zero on a fresh install, and a
+  # transfer into the account is invisible to it. Without this call the seed produces
+  # a gateway that refuses every purchase with `#reserveShort{available = 0}` while
+  # the ledger holds 100 T — and nothing fails, compiles differently, or says why.
+  #
+  # The hourly sweep would eventually pick it up. "Eventually" is the wrong answer
+  # for a script whose whole job is to hand over a working gateway.
+  if ! icp canister call backend refresh_reserve '()' >/dev/null 2>&1; then
+    printf '  \033[33m!\033[0m funded the reserve but refresh_reserve failed.\n'
+    printf '    The gateway will refuse every sale until it observes the balance:\n'
+    printf '      icp canister call backend refresh_reserve %s\n' "'()'"
+  fi
+  echo "reserve:     $RESERVE_TOP_UP cycles in the gateway's own ledger account, observed"
+else
+  printf '  \033[33m!\033[0m could not TOP UP the cycles reserve by %s:\n' "$RESERVE_TOP_UP"
+  printf '    %s\n' "$RESERVE_OUT"
+  # ⚠️ **Name whose balance that is.** `icp cycles transfer` reports "insufficient
+  # funds. balance: N" for the SENDER — this identity's cycles-ledger account — but it
+  # prints under a heading about the reserve, so a reader takes N for the reserve's own
+  # balance. The two are wildly different (the reserve held 675 T while the sender had
+  # 53 T), and the confusion is structural: there are THREE balances here and the
+  # documentation names two.
+  printf '    ⚠️ that "balance:" is THIS IDENTITY'"'"'s cycles-ledger account (the sender),\n'
+  printf '       not the reserve and not the canister'"'"'s gas. Three balances:\n'
+  printf '         sender  : icp cycles balance\n'
+  printf '         reserve : icp cycles balance --of-principal %s\n' "$BACKEND_ID"
+  printf '         gas     : icp canister status backend\n'
+  # ⚠️ **Observe anyway — a failed top-up does NOT mean the account is empty.** The
+  # gateway's ledger account survives a canister reinstall (it is a separate canister),
+  # so after the documented reinstall-and-reseed loop it usually still holds the whole
+  # reserve while the floor has been reset to zero. Skipping the observation here left
+  # `availableToSell = 0` with 675 T sitting in the account, and the die below then
+  # blamed observation while this branch blamed funding. Neither was actionable.
+  RESERVE_TOPPED_UP=0
+  # ⚠️ **Capture this failure too — fourth instance of the swallowed-reason pattern in
+  # this file, and the one that invalidates the die below.** That die tells the operator
+  # the account "is empty or unreachable, not merely unobserved", which is only
+  # established if the observation actually ran. A stopped canister, a renamed method or a
+  # network blip means "merely unobserved" is exactly what is happening — and the reader
+  # has been told it is not, with no trace that we even tried.
+  if OBSERVE_OUT="$(icp canister call backend refresh_reserve '()' 2>&1)"; then
+    RESERVE_OBSERVED=1
+    # ⚠️ **Exit zero does NOT mean the floor was adopted.** `refresh_reserve` returns the
+    # ledger balance it read whether or not it adopted it: `reconcileReserve` returns early
+    # without touching the floor when the quiet window is unsatisfied, audits
+    # `reserve.reconcileSkipped`, and the call still succeeds. One escalated order makes
+    # that window unsatisfiable for the life of the canister, so this is a reachable state
+    # and not a hypothetical. Keep the returned figure — non-zero with nothing to sell is
+    # "observed but not adopted", a different diagnosis and a different fix from "empty".
+    RESERVE_OBSERVED_BALANCE="$(printf '%s' "$OBSERVE_OUT" | tr -d '_' | grep -oE '[0-9]+' | head -1 || true)"
+    printf '    observed the account anyway — if it already held cycles, the floor is now set.\n'
+  else
+    printf '    \033[33mand refresh_reserve ALSO failed, so the floor is not observed either:\033[0m\n'
+    printf '      %s\n' "$OBSERVE_OUT"
+  fi
+  printf '    If the account really is empty, orders will be created and PAID and then\n'
+  printf '    retry delivery forever. Fund it by hand, then observe:\n'
+  printf '      icp cycles transfer %s %s\n' "$RESERVE_TOP_UP" "$BACKEND_ID"
+  printf '      icp canister call backend refresh_reserve %s\n' "'()'"
+fi
+
+step "admission gate"
+# A $10 floor and a $100 ceiling. One pair governs presets AND custom amounts — do not
+# add a custom-amount-specific limit.
+#
+# ⚠️ **One open order per principal, the shipped value — not a dev convenience.** It used
+# to be 3 here, which meant local runs never exercised the product decision: a buyer who
+# wants another order cancels the one they have. Testing that loop matters more than the
+# convenience of holding three orders open, and a tester who wants the old behaviour can
+# call `set_gate_config` themselves.
+#
+# It is only safe because `Orders.openOrderCount` stops counting an order past its own
+# deadline: at a cap of 1 without that, one missed expiry webhook locks a buyer out
+# permanently rather than for the session's 35 minutes.
+icp canister call backend set_gate_config \
+  '(record { maxOpenOrdersPerPrincipal = 1 : nat;
+             maxPurchaseUsdCents = 10_000 : nat;
+             minPurchaseUsdCents = 1_000 : nat;
+             minCanisterCycles = 5_000_000_000_000 : nat })' \
+  >/dev/null || die "set_gate_config failed"
+
+# Re-read the balance and compare it to the floor the gate now holds, rather than
+# trusting the top-up's exit code.
+CYCLES="$(icp canister call backend cycles_status '()' 2>/dev/null)"
+BALANCE="$(printf '%s' "$CYCLES" | grep -oE 'balance = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || echo 0)"
+FLOOR="$(printf '%s' "$CYCLES" | grep -oE 'floor = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || echo 0)"
+if [ "${BALANCE:-0}" -le "${FLOOR:-0}" ]; then
+  die "the canister still holds ${BALANCE:-0} cycles against a ${FLOOR:-0} floor, so
+    every purchase is still refused. The top-up reported success, so check:
+      icp canister call backend cycles_status '()'"
+fi
+ok "cycles floor kept at $((FLOOR / 1000000000000)) T; canister holds $((BALANCE / 1000000000000)) T"
+
+# ⚠️ **`unboundedGiveaway` is not a seeding failure, and reporting it as one sent two
+# readers hunting a misconfiguration that was not there.** It is the faucet guard
+# saying the allow-list is empty — the one step this script cannot do for you, because
+# the principal it needs is the one your browser signs in with. Every other refusal here
+# IS a seeding failure and still dies.
+VERDICT="$(icp canister call backend can_purchase '(1_000 : nat)' 2>&1)"
+case "$VERDICT" in
+  *"variant { ok }"*)
+    ok "a \$10 purchase is admitted — the gateway is sellable"
+    ;;
+  *unboundedGiveaway*)
+    printf '  \033[33m!\033[0m seeding is complete, and NOBODY can buy yet: the allow-list is empty.\n'
+    printf '      Sign in at http://frontend.local.localhost:%s/ , copy the principal it\n' "$GATEWAY_PORT"
+    printf '      shows, then run:\n'
+    printf '        icp canister call backend add_allowed_buyer '"'"'(principal "<your-principal>")'"'"'\n'
+    ;;
+  *)
+    die "the gateway refuses a \$10 purchase for a reason seeding should have fixed:
+    $VERDICT"
+    ;;
+esac
+
+# ⚠️ `can_purchase` above does NOT cover solvency, and cannot: it is a query, and
+# reading the reserve is what the gate does synchronously inside `create_order`. So
+# the reserve is verified separately, against the same figure the gate decides on —
+# otherwise a missing `refresh_reserve` sails past every check in this script and
+# surfaces as a refusal on the first real order.
+# ⚠️ **Two faults here, and the second is worse than a swallowed reason.** This read
+# used to be `2>/dev/null` with `|| echo 0` on the parse — so ANY failure became
+# `AVAILABLE=0` and was reported as the one cause below. A wrong VALUE substituted for
+# an error is worse than a hidden message, because the message that follows is
+# confident and specific.
+#
+# The die's cause is the dominant one and stays. But the same swallow hid "the method
+# does not exist" — which is exactly what a rename produces, and this file has just been
+# through one — plus "the canister is not deployed" and "the network is down". So the
+# call is checked separately from the parse, and each says which happened.
+if ! RESERVE="$(icp canister call backend reserve_status '()' 2>&1)"; then
+  printf '\n%s\n\n' "$RESERVE" >&2
+  die "could not read reserve_status — the reason is printed above. A missing method means
+    this script is older than the canister it is seeding; anything else is the network
+    or the deployment."
+fi
+AVAILABLE="$(printf '%s' "$RESERVE" | grep -oE 'availableToSell = [0-9_]+' | tr -d '_' | grep -oE '[0-9]+$' || true)"
+if [ -z "$AVAILABLE" ]; then
+  printf '\n%s\n\n' "$RESERVE" >&2
+  die "reserve_status answered but had no availableToSell field — the response is above.
+    The shape changed and this script did not."
+fi
+# ⚠️ **Three outcomes, not two, because the claim each makes is different.** Asserting
+# "not merely unobserved" is only sound when the observation ran; if it did not, that is
+# precisely what is happening.
+if [ "$AVAILABLE" -eq 0 ] && [ "$RESERVE_TOPPED_UP" -eq 0 ] && [ "$RESERVE_OBSERVED" -eq 0 ]; then
+  die "the gateway will sell 0 cycles, and BOTH the top-up and the observation failed —
+    so this says nothing about whether the account holds cycles. Both errors are printed
+    above; fix the reachable one first, then:
+      icp canister call backend refresh_reserve '()'
+      icp canister call backend reserve_status '()'"
+fi
+if [ "$AVAILABLE" -eq 0 ] && [ "$RESERVE_TOPPED_UP" -eq 0 ] &&
+   [ -n "$RESERVE_OBSERVED_BALANCE" ] && [ "$RESERVE_OBSERVED_BALANCE" -gt 0 ]; then
+  # ⚠️ Observed a NON-ZERO balance and still nothing to sell: the read succeeded and the
+  # floor was not adopted. "Fund it" is the useless answer here — the account is full.
+  die "the gateway will sell 0 cycles, and the account holds $RESERVE_OBSERVED_BALANCE.
+    So the balance was OBSERVED and NOT ADOPTED — the quiet window is unsatisfied, which
+    one escalated order can make permanent. Do not fund it; that changes nothing. Look for
+    reserve.reconcileSkipped in the audit log and an order stuck with an unsettled
+    delivery:
+      icp canister call backend pending_deliveries '()'
+      icp canister call backend audit_log '(null, 50 : nat)'"
+fi
+if [ "$AVAILABLE" -eq 0 ] && [ "$RESERVE_TOPPED_UP" -eq 0 ] && [ -z "$RESERVE_OBSERVED_BALANCE" ]; then
+  # ⚠️ **The observation succeeded but its output carried no number, so it establishes
+  # nothing about the account.** Falling through to the "empty" message below would be the
+  # same claim-not-established defect this whole section exists to remove, in the sliver
+  # where the parse — not the call — is what failed.
+  die "the gateway will sell 0 cycles. The top-up failed and the observation SUCCEEDED but
+    printed no balance this script could read, so whether the account holds cycles is
+    UNKNOWN — do not act on either answer. Its output was:
+      $OBSERVE_OUT
+    Read the balance directly, then decide:
+      icp cycles balance --of-principal $BACKEND_ID"
+fi
+if [ "$AVAILABLE" -eq 0 ] && [ "$RESERVE_TOPPED_UP" -eq 0 ]; then
+  # The observation ran and parsed a zero, so the account really is empty.
+  die "the gateway will sell 0 cycles. The top-up FAILED and the observation read an EMPTY
+    account, so it is genuinely empty rather than unobserved. Read the transfer error above
+    (⚠️ its \"balance:\" is the SENDER's), fund the account, then:
+      icp cycles transfer $RESERVE_TOP_UP $BACKEND_ID
+      icp canister call backend refresh_reserve '()'"
+fi
+if [ "$AVAILABLE" -eq 0 ]; then
+  # ⚠️ The top-up ran, so the account holds cycles and the floor did not take them.
+  # "Run refresh_reserve" is only the fix if the observation was never made — and the
+  # seed just made it. If it skipped, running it again skips again.
+  die "the gateway will sell 0 cycles even though the top-up SUCCEEDED. The floor did not
+    take the balance, and the seed already ran the observation — so re-running it is not
+    the fix unless the first call errored. Check which:
+      icp canister call backend reserve_status '()'      # reserveObservedAtNs recent?
+      icp canister call backend pending_deliveries '()'  # an unsettled delivery freezes
+      icp canister call backend audit_log '(null, 50 : nat)'   # reserve.reconcileSkipped
+    An unsettled delivery makes the quiet window unsatisfiable; settle or escalate it." 
+fi
+ok "reserve floor observed; $((AVAILABLE / 1000000000000)) T available to sell"
+
+printf '\n\033[32m✓ local gateway seeded\033[0m\n'
+cat <<NOTES
+
+  Open http://frontend.local.localhost:${GATEWAY_PORT}/
+
+  What works now, and what needs Stripe:
+    - Browsing amounts, signing in, creating an order, cancelling: all work
+      — but CREATING an order needs your principal on the buyer allow-list
+      first. Sign in, copy the principal, then:
+        icp canister call backend add_allowed_buyer '(principal "<yours>")'
+      Or re-run this script with BUYER_PRINCIPAL=<principal>. Without it the
+      gateway refuses every buyer with unboundedGiveaway, because a funded
+      reserve plus free Stripe test payments plus an empty list is a faucet.
+    - PAYING needs BOTH Stripe secrets. There are no Payment Links any more:
+      the canister creates a Checkout Session per order and sets
+      client_reference_id on it through the API, so nothing has to be
+      configured in the Dashboard.
+
+        1. A restricted API key (rk_...) with Checkout Sessions = Write (which
+           includes the read the recovery sweep needs) and everything else None.
+           Put it in scripts/.local-dev.env (gitignored, sourced by this script)
+           rather than on a command line, then re-run.
+        2. A signed webhook to deliver: scripts/stripe-dev.sh starts the
+           forwarder and provisions the signing secret from that session.
+
+      Check both with stripe_api_key_status and webhook_secret_status.
+
+  One thing in a paying run that looks like a bug and is not:
+    - The session expires 35 minutes after creation, enforced by Stripe. The
+      pay button disappears at the deadline, and it goes before the
+      checkout.session.expired webhook lands, because the UI renders expiry
+      from expiresAtNs rather than from the status.
+
+  ⚠️ The CMC rate goes stale in 15 minutes. Re-run with --rate-only.
+NOTES

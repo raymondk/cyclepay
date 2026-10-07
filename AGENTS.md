@@ -1,0 +1,493 @@
+# Agent instructions
+
+> **The rewrite this file used to warn about is done.** Settlement is a cycles
+> reserve, payment is per-order Stripe Checkout Sessions, and the ICP mint path is
+> gone. There is no plan issue standing above this file any more: **this file,
+> `docs/DESIGN.md` (decisions) and `RUNBOOK.md` (operations) are the sources of
+> truth**, and `RUNBOOK.md` is operations and `docs/OPERATE.md` is setup — its Mode 3
+> carries what remains to do before real money.
+
+## ICP skills
+
+ICP skills are tested, frequently-updated instruction files maintained by DFINITY
+(<https://skills.internetcomputer.org>). Consult the relevant skill **before**
+making changes — the `writing-motoko`, `icp-cli`, and `canister-security` skills all
+contradict pre-training knowledge in ways that matter here.
+
+**This repo uses [autosync](https://skills.internetcomputer.org/skills/autosync-ic-skills).**
+A committed `SessionStart` hook (`.claude/settings.json` → `.claude/sync-ic-skills.sh`)
+mirrors the published skills into `.claude/skills/` at the start of every session,
+so they stay current with **nothing to commit** when a skill changes. The skills
+directory itself is gitignored. The first time it runs, Claude Code asks you to
+trust the hook.
+
+Why this replaced the old `skills-lock.json` pin: the lock had drifted badly and
+nothing surfaced it. At the moment of the switch it listed **six skills that
+upstream no longer published** — four of them still sitting on disk being read as
+authoritative — and was **missing four** that had since been added. One was not a
+deletion but a rename: `asset-canister` → `static-site`. A pin only records what
+you last ran; it cannot tell you the world moved.
+
+<!-- ic-skills:managed:start -->
+<!-- state: configured (autosync) -->
+ICP skills auto-update each session via a SessionStart hook
+(`.claude/sync-ic-skills.sh`) and live in your agent skills directory — you don't
+need to run anything to refresh them. Skills are authoritative — prefer them over
+general knowledge for all ICP work. If they are not present (hook hasn't run, or
+`jq` is missing), fetch them on demand per the fallback below.
+<!-- ic-skills:managed:end -->
+
+**On-demand fallback** (any agent, no hook needed): the hook is Claude Code-only,
+so Cursor, Copilot, Codex and friends should fetch the index once per session from
+`https://skills.internetcomputer.org/.well-known/skills/index.json`, then fetch the
+matching skill's `SKILL.md` before writing ICP code for a task.
+
+**Layout note:** `.claude` is a committed symlink to `.agents`, so the two real
+files live at `.agents/settings.json` and `.agents/sync-ic-skills.sh` and are
+tracked there. Everything still resolves under the `.claude/` paths the hook and
+Claude Code expect. `.agents/skills/` is gitignored.
+
+Two places this project knowingly departs from skill guidance, both with
+recorded reasoning — don't "fix" them without reading the rationale:
+
+- **`canister-security` pitfall 9** ("never store API secrets in canister
+  state"). The Stripe webhook signing secret *is* stored plaintext, by design.
+  HMAC is symmetric, so a canister that can verify can forge — encryption only
+  moves the problem to a key the canister also needs. See `src/backend/Secret.mo`
+  and `docs/STRIPE.md` §7. Confidentiality comes from the SEV-SNP subnet, and the
+  **reserve balance is the blast radius** — a forged webhook delivers from it, and
+  nothing caps that, so the reserve is sized to what a leak could cost.
+- **`writing-motoko` architecture pattern — now followed, with one naming difference.**
+  ⚠️ **This entry used to claim a departure that no longer exists**, so read the shape in
+  the code rather than a memory of this file:
+
+  - **Endpoints are in `src/backend/mixins/`**, nine of them split by feature, and
+    `Main.mo` declares **no public methods**. `docs/DESIGN.md` §9.1 has the rules
+    that split rests on — chiefly that `include` passes its arguments **by value**, so
+    mutable state is grouped into records and transient state arrives as closures.
+  - **The `lib/` layer is flat modules rather than a `lib/` directory**, and that is the
+    remaining difference: `Orders`, `Delivery`, `Gate`, `Reserve`, `Pricing`, `Receipts`,
+    `rails/Card` with its explicit `Card.Deps`. Stateless, state as a parameter, which is
+    what lets the whole ingestion path unit-test with no IC environment. Equivalent
+    separation under a different filename; nothing about it is a departure in substance.
+  - **A3, and why nine endpoint bodies exceed 20 code lines anyway.** The rule is
+    "if a body is more than authorize → delegate → map, the middle belongs in a module",
+    and the decisions that were extractable have been: `create_order`'s — amount,
+    admission, quote, the caller's floor — is `Purchase.plan`, which is what made its
+    **error precedence** unit-testable rather than reachable only through PocketIC.
+    ⚠️ **In the nine bodies still over the line, the length is the RETURN TYPE or the
+    guards, not logic** — `reserve_status` is 16 of 33 lines of inline record type,
+    `operator_summary` 11 of 23. A3 is about logic, and a return type is neither, so
+    those are not pending work: the metric counts type lines. Measure a body as
+    non-blank, non-comment lines INCLUSIVE of the `public …func` line and the closing
+    `};`, because a reviewer and I differed by exactly those two.
+  - ⚠️ **`check-did-signatures.sh` is an IDENTITY check, not a compatibility one, and it
+    is not the authority on whether a deliberate interface edit is safe.** Naming an
+    inline return record is `didc`-compatible in both directions — Candid is structural,
+    so a type alias is not part of the wire type — and this script still reports it as
+    changed, correctly for its own job: proving a relocation moved nothing. There is no
+    compatibility check in the gate (`didc` is not wired in), so a deliberate change
+    needs that judgement made by hand.
+  - ⚠️ **Extracting a decision buys TESTS, not a smaller body.** Measured: one
+    extraction left the body the same length and another made it LARGER, because a named
+    ladder call site is longer than the inline `if` it replaces. What it buys is that the
+    decision becomes checkable without an IC environment — `Purchase.plan`'s error
+    precedence, `Orders.cancelShape`'s whole status space. So do not read a body over the
+    line as work not done, and do not chase the count by moving code that has nowhere
+    better to live.
+  - ⚠️ **One part of A3 is a STATED EXCEPTION, not unfinished work.** `create_order`'s
+    body keeps commit → outcall → re-check → attach. The commit takes the reserve hold in
+    a block with no `await` and the order id IS the `client_reference_id`, so the sequence
+    cannot be rearranged; it needs actor capabilities (`raw_rand`, the outcall) and moving
+    it into a module would make it harder to see, not easier. Two integration scenarios
+    guard it — 67b (the hold exists while the outcall is parked) and 67c (the cycles
+    delivered are the cycles held, across a price move) — and each was mutation-verified
+    against the specific defect it covers. **Do not "finish" A3 by moving that block.**
+
+  ⚠️ **A recorded departure is a claim with a scope, and it expires.** The previous
+  version of this entry was written about `lib/` and then read as covering the monolith
+  too, which is how an agent skips a finding nobody decided to accept. When a skill and
+  this file disagree, the skill wins unless the reasoning here says why *for that
+  specific finding* — and if the reasoning has expired, fix this file rather than working
+  around it.
+
+## Running it locally
+
+```sh
+git submodule update --init --recursive   # first time only
+icp network start -d && icp deploy && scripts/local-dev-seed.sh
+```
+
+**`docs/OPERATE.md`, Mode 1, is the procedure** — the submodule, the seed, the
+iteration loops and the troubleshooting table. Two things it explains that will
+otherwise cost you an hour: the pinned crypto submodule is a `mops` path dependency,
+so without it nothing compiles and the error names a missing package rather than a
+missing submodule; and the seed is **not optional**, because a fresh deploy is
+fail-closed on five separate axes at once and presents as a broken app.
+
+This section deliberately carries no copy of that procedure. It had one, and it drifted
+— it claimed four axes where the README said five, and the axis it omitted was the one
+the README calls "the one nobody guesses".
+
+### Do not cycle the network
+
+`icp network start` takes **minutes**, and **two projects cannot run local
+networks at once** (the fixed `gateway.port: 8000` in `icp.yaml`).
+
+- **Check first** with `icp network status`. If one is running, **use it** — do
+  not restart it to get a clean slate.
+- **Start only if absent**, and remember that you started it.
+- **Never stop a network you did not start.** You cannot tell whether a human is
+  mid-manual-run, or whether the network belongs to another project. Stopping one
+  has already destroyed a session's worth of delivered test orders, their audit
+  trail, and a local Internet Identity registration.
+- **For a clean slate, reinstall — do not restart.** `icp deploy --mode reinstall
+  --yes` then `scripts/local-dev-seed.sh` takes seconds and is the documented loop
+  for a stable-shape change; a network restart takes minutes and throws away more
+  than you wanted.
+- **Leave it running when you finish**, and say so in the PR. The next piece of
+  work needs it.
+
+## Scope: the Card rail is the product
+
+CyclePay onboards developers who have **no ICP, no wallet, and no exchange
+account**. That is the whole point, and it is why the Stripe rail gets the
+attention: for that user a stablecoin rail is not an option, because acquiring
+the stablecoin is the same problem over again.
+
+The card rail is the only rail — a second, disabled ck-USDC rail was removed,
+because carrying a rail we do not ship made every other change bigger.
+
+`Types.Rail` stays a single-case variant so a future rail is an additive change
+rather than a schema-wide edit — the same reasoning as `Types.Owner`.
+
+## Project conventions
+
+- **`icp-cli`, never `dfx`.** Project config is `icp.yaml`; Motoko deps are
+  `mops.toml` / `mops.lock`.
+- **Comments document what the code does.** Not what it used to do, and not a
+  judgement on an earlier implementation. Design history belongs in **commit
+  messages and GitHub issues**, where it is dated and attributable; a comment saying
+  "this was previously wrong" is noise to everyone who reads the file later. ⚠️ The
+  exception, and it is narrow: a comment that stops a future mistake stays, written as
+  a **rule** rather than as a story about a past change.
+- ⚠️ **The ⚠️ marker is for a TRAP, not for a fact**, and
+  `scripts/check-markers.py` enforces the part a check can own. The test is: *can the
+  next editor act on this the wrong way, and would the damage be unrecoverable or
+  invisible?* **"Do not add a force flag to `refresh_reserve`"** earns it — the flag
+  reintroduces the bug the predicate prevents. **"This count going LOW is the oversell
+  direction"** does not: it is orientation, it keeps every word of its text, and it loses
+  the glyph. The marker only works while it is rare, and the asymmetry is why it matters:
+  an unread warning on the money path costs more than a missing one, because its presence
+  is what a reviewer trusts.
+  - **Never in a test, suite or describe NAME** (enforced). The name states the property;
+    the glyph adds nothing and prints on every run.
+  - **The population may only FALL** (enforced): `MARKER_CEILING` is the tree-wide total
+    and the check fails on any disagreement in either direction. A new marker is a
+    one-line ceiling edit with the reason in the commit, and a cleanup pass ratchets it
+    down visibly in the diff.
+  - **A comment block with three markers almost certainly has one trap and two
+    explanations** — worth checking against the phrase test above. Judgement, not a rule.
+  - **An endpoint `///` doc is PUBLISHED** into `backend.did` and the generated
+    TypeScript, so a marker there reaches API callers. Keep the ones a caller can act on
+    (*"uncertified query answers, nothing may be wired to decide on them"*); a note to the
+    next editor about our own layout or history belongs in a `//` beside the
+    implementation. `PUBLISHED_CEILING` ratchets that count the same way.
+- ⚠️ **No bare `#NN` issue reference outside `docs/agents/`**, and
+  `scripts/check-issue-refs.py` enforces it. Not in code, not in tests, not in docs, not
+  in scripts, not in a suite or test name. An issue number reads as a pointer to a live
+  requirement and is a pointer to a closed argument — and it defers the work: whatever
+  the reference stood for has to be said here, in terms of the code as it is now, or
+  dropped. Name the mechanism, the file, or the rule instead.
+  - `docs/agents/` is exempt: it is agent process rather than product, and both files
+    there exist to point at issues.
+  - ⚠️ **An EXTERNAL tracker stays, written qualified** — `dfinity/icp-js-core#1384`,
+    never the number on its own. This is the narrow case worth keeping: an issue we
+    *rely on*,
+    about code this repo does not own, where the number is the only way a reader reaches
+    the claim's source. `src/frontend/src/ic-env.ts` is the live instance. The qualified
+    form is what makes the distinction checkable rather than a judgement call.
+- ⚠️ **There is no `design-docs/` any more, and its deletion is the cautionary tale
+  for this rule.** Three files, 1,252 lines, no staleness banner — and 67 mentions in
+  one of them of architecture that had already been removed, while `Main.mo` and
+  `Types.mo` still cited it by section number. Two of its claims had been **reversed**,
+  not merely outdated, so a reader was carrying the opposite of the truth. What was
+  still true is `docs/DESIGN.md` — 215 lines against 1,252, holding decisions and
+  nothing else.
+- ⚠️ **Comment volume is a defect, and deleting a comment is the one change with no
+  failure signal.** No compiler error, no red test, and the diff shows what left but not
+  what was lost. So three rules, front-loaded because nothing downstream can catch a bad
+  call:
+  1. **Name the mistake the comment prevents** — and the test is **"would the next
+     editor of THIS function get it wrong without this line?"**, not "is this true and
+     worth knowing". Almost all of this prose is true and worth knowing; that is why the
+     weaker reading keeps everything.
+     - ⚠️ **Keeper**, because a general rule would be misapplied here without it:
+       *"Unbounded input on purpose… a cap would only buy silent truncation."* The repo
+       has a paginate-everything rule, so the next person applying it uniformly would cap
+       this query and break it.
+     - ⚠️ **Not a keeper**, because nobody editing that function is about to undo it:
+       *"It no longer discloses the cycles-ledger fee."* The principle inside it — the
+       canister owns what only it knows, the ledger owns what it owns — belongs in
+       `docs/DESIGN.md`, where it applies to more than one function.
+  1b. ⚠️ **A comment is about the CODE, not about itself.** Technically covered by
+     "history belongs in commits", but the hazard is distinct and compounds: the comment
+     becomes about its own biography, a reader spends attention on the document rather
+     than the code, and the next correction adds a layer (*"an earlier version of this
+     note said…"*). Delete on sight: *"This paragraph said X and both halves stopped
+     being true"*, *"An earlier version argued Y. That argument was wrong."* Keep the
+     rule; drop the story.
+  1c. ⚠️ **Two opening sentences that both describe what the function does means one is
+     a leftover.** New line added, old one not deleted, both surviving as adjacent
+     summaries — found three times (`Orphans.add`, `Orphans:283`, `AuditLog.append`),
+     twice still promising a field that no longer exists. Deliberately **not** a gate
+     step: distinguishing a leftover from a legitimate two-sentence summary is fuzzy, and
+     a noisy check gets ignored. It is cheap for a human reading a doc block, so it is a
+     review-attention item.
+  2. **Never delete without a destination.** Every removed comment either lands in
+     `docs/DESIGN.md` or is rewritten as a **rule at the site**. A removal with no
+     destination is what a reviewer should scrutinise — it is the only case where they
+     have nothing to compare against.
+  3. **The commit message carries the mapping** — what moved where. It is the only
+     recoverable record if a judgement turns out wrong. ⚠️ **State the glob when you
+     quote a count**: `src/backend/*.mo` excludes `src/backend/rails/`, and four passes'
+     figures silently did.
+  4. ⚠️ **When you DELETE a mechanism, grep its vocabulary and read every hit asking
+     whether it is cited as the JUSTIFICATION for unrelated behaviour.** A sweep aimed at
+     *usage* misses these — the code no longer used the ring, but comments still cited it
+     as the reason for something else, leaving a true conclusion propped up by a false
+     premise. The class shares one shape: **the conclusion survived the change and its
+     justification did not.**
+
+     ⚠️ **The term list is an artifact, not a memory: `docs/agents/deleted-vocabulary.md`.**
+     Add a mechanism's vocabulary there when you delete it. `scripts/sweep-vocabulary.py`
+     is a gate step and scans the lines your change **adds**, printing each hit with its
+     recorded disposition — so the legitimate ones are not re-adjudicated every time.
+     ⚠️ It **prints and passes**: most hits are correct prose, and a check that fires on
+     correct code teaches people to ignore it. Read them; a reviewer decides.
+
+     ⚠️ **It keeps no counts, and that is the design.** A recorded population cannot tell
+     "removed two legitimate uses, added one stale claim" from "removed one", so a
+     prose-purging change that also adds a stale claim nets down and reads clean. A count
+     also needs globs, and a glob list goes stale in silence — the version that kept counts
+     covered 40 files and never saw `test/`, `src/backend/rails/` or `scripts/`.
+
+     ⚠️ **Derive the term list from the deletion itself, not from the names you remember
+     — and include the VERB for what the mechanism did.** The first attempt at this swept
+     `ring`, `capacity`, `float`, `treasury`, `burn cap` and missed **`evict`/`eviction`**,
+     which is a verb the code no longer uses — leaving five survivors including an
+     operator-facing RUNBOOK line stating a cap that no longer exists as a parameter, and
+     a second false `AddResult.evicted` reference 118 lines from the one that had just
+     been fixed. Also sweep the **names of deleted variants**: `#deliveryDelayed` and
+     `#abandoned` were still live rows in RUNBOOK §6's triage table, and the surviving
+     rows still carried the *old* field lists.
+  5. ⚠️ **Verify the `DESIGN.md` section against the CODE before the deletion, not
+     after.** A section transcribed from comments inherits the comments' errors, and once
+     the comments are gone the original is no longer there to audit against. Three of
+     three passes so far found a comment whose *conclusion* was right and whose *stated
+     reason* was false — so "it was in the comment" is not evidence.
+- ⚠️ **`⚠️` is tiered: prohibitions only.** Use it where ignoring the line loses money or
+  breaks an invariant — not for explanation. A marker used 310 times is not a marker;
+  it only works while seeing one makes you stop.
+- ⚠️ **`docs/DESIGN.md` is where a DECISION goes, and it is enforced.** Code comments say
+  what the code *does*; the reason it is that way goes in the `§N` record.
+  `scripts/check-design-sections.py` fails the gate if a `§N` the code cites has no
+  section, or a section is cited by nothing — so it cannot silently drift out of use.
+  ⚠️ **What no check can verify is whether a section is TRUE**, which is why the rule is
+  *change the behaviour, change that file in the same commit*. Its predecessor did not
+  rot by being abandoned; it rotted by being updated less often than the code.
+- The committed `src/backend/dist/backend.did` is the embedded `candid:service`
+  metadata *and* the frontend's bindgen source. Run `mops build` after any
+  backend API change, and commit the regenerated `.did`.
+- **Where to look for what:**
+
+  | Question | Source |
+  |---|---|
+  | What does it do? | the code, and `docs/STRIPE.md` for the Card rail end to end |
+  | How do I operate it? | `RUNBOOK.md` — authoritative for procedure |
+  | Why is it built this way? | `docs/DESIGN.md` — the `§N` record, gate-enforced |
+
+  ⚠️ The spec is **non-binding rationale, not a contract.** Several of its
+  decisions have been superseded; those sections say so inline and keep the
+  original reasoning for provenance. **The implementation wins where they
+  disagree** — never "fix" code to match the spec without checking whether the
+  spec is the stale side.
+
+- **Any fact about money lives on a permanent record.** The audit log is a
+  4,096-entry ring buffer and drops its oldest entries, so it is telemetry only.
+  If a new behaviour produces a fact someone could need in six months — what was
+  paid, what was delivered, which block carried it — put it on the order or the
+  journal, not only in an audit tag.
+
+## Issue tracker
+
+Issues for this repo live in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+**GitHub Issues is the single source of truth for all task and progress
+tracking.** `PRD.md` was deleted 2026-09-09: it was frozen in June and described the
+ICP-float / CMC-mint / ck-USDC architecture, none of which exists, so a reader
+found a confident account of a system that no longer exists. Recoverable from git history
+if ever needed.
+
+⚠️ **Rewriting a long issue BODY goes through `scripts/issue-body.py`, not through a
+shell heredoc.** A long issue body was destroyed this way — Markdown built in an *unquoted* heredoc let
+the shell run the backticks in the text, and a mangled 101k-char body replaced 53k. The
+script does the three things that make the edit recoverable and checkable:
+
+```bash
+scripts/issue-body.py get  12 /tmp/i12.md   # fetch, verified against the API's own count
+#   ...edit /tmp/i12.md...
+scripts/issue-body.py put  12 /tmp/i12.md   # write, then RE-FETCH to prove it stored
+scripts/issue-body.py diff 12 /tmp/i12.md   # is the remote still what this file says?
+```
+
+⚠️ **`put` verifies by reading back**, because GitHub accepting the request is not
+evidence: the corrupting write was accepted cleanly. Adding a *comment* needs none of
+this — `gh-axi issue comment N --body-file <path>` is additive and cannot destroy a body,
+so prefer a comment whenever the content is additive.
+
+## Triage labels
+
+Default vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`,
+`ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+## Verifying your work
+
+Never report a task done on a build alone. **One command runs the whole gate:**
+
+```sh
+scripts/test-all.sh          # everything, in dependency order, fail-fast
+scripts/test-all.sh --fast   # skips the PocketIC suite (see the host note below)
+```
+
+⚠️ **Several of its steps are checks a hand-run sequence silently skips**, and each exists
+because the thing it checks had already drifted once. No count here: the script derives its
+own total by counting its `run` invocations, and a number restated in prose is one more
+thing to expire.
+
+| step | asserts | why |
+|---|---|---|
+| `.did` is current | the committed interface matches the code | it is both the embedded `candid:service` metadata and the frontend's bindgen source |
+| `check-doc-surface.py` | the docs' method lists match the `.did` | `docs/STRIPE.md` claimed "the whole admin surface" while missing 11 of 29, and RUNBOOK named a method that never existed |
+| `check-design-sections.py` | every `§N` the code cites exists in `docs/DESIGN.md`, and every section is cited | the 697-line spec it replaced rotted by being updated less often than the code |
+| `check-heredocs.sh` | no unquoted heredoc runs its own body | one destroyed a GitHub issue body, one turned a script's notes into an `icp deploy` |
+| `mops check`'s stable check | the actor's stable shape is still compatible with `deployed/backend.most` | an incompatible shape passed every step and was refused at DEPLOY time instead; ⚠️ it also fails when the baseline is missing, which is what stops it self-certifying |
+| `scripts/check-stable-promotion.sh` | ⚠️ not in the gate — it runs at PROMOTION time, which the gate cannot see. Whether a baseline diff is type-hash renumbering or a real shape change | a promotion blessed a real change because the diff looked like compiler noise. 91 of ~260 lines move on a compiler bump alone |
+| `check-bindings.sh` | the suite's committed Candid bindings match the `.did` | the integration CI job installs only that suite's deps and never builds the backend, so it typechecks against whatever is in the checkout |
+| `check-unused-exports.py` | no module exports something nothing calls | a deleted caller leaves an export that reads as live API |
+| `sweep-vocabulary.py` | prints added lines naming a deleted mechanism | ⚠️ **advisory — it passes on hits**; it fails only when it cannot determine a base ref, which is the didn't-run case |
+
+### The stable baseline, and the two compatibility checks that are NOT the same thing
+
+⚠️ **The gate reports two different kinds of incompatibility, and reading one as the other
+has cost a sibling project two wrong deploy instructions** — one of which, followed, would
+have destroyed a canister's whole event log. Keep them apart:
+
+⚠️ Named by the command that reports them, not by step number — a step number in prose
+goes stale the next time a step is inserted, and the script derives its own numbering.
+
+| what you see | it means | what to do |
+|---|---|---|
+| `mops build`: `.did is out of date` | the **committed Candid file** does not match the code | `mops build`, commit the `.did`, regenerate the suite's bindings. ⚠️ Says NOTHING about stable state — an added method trips this and is perfectly upgradable |
+| `mops check`: `Stable compatibility check failed` | the **stable shape** cannot be reinterpreted from the deployed one | locally reinstall and reseed; on mainnet this needs a migration. ⚠️ This is the one where deployed data is at stake |
+
+**After ANY change that moves the stable shape — compatible or not** — once it is deployed
+(reinstalled and reseeded if it had to be):
+
+⚠️ **"Compatible" does not mean "no promotion", and the failure is a genuinely
+incompatible change PASSING.** Measured, in two steps:
+
+1. Add `probeF : Nat` with an initializer. Upgrade-compatible, no reinstall needed —
+   `mops check-stable` passes, correctly. Skip the promotion.
+2. Change `probeF` to `Text`. Against the **stale** baseline, which has no `probeF` at all,
+   that reads as "adding `probeF : Text`" and `mops check-stable` **passes again**. The
+   deployed canister holds `probeF : Nat`, so the real upgrade is incompatible and traps in
+   `post_upgrade`.
+
+So the baseline moves whenever the shape moves. One un-promoted compatible change is
+enough to blind the check to the next incompatible one.
+
+```sh
+mops build
+scripts/check-stable-promotion.sh  # what IS this diff? see below — run it BEFORE promoting
+mops deployed                      # promotes dist/backend.most → deployed/backend.most
+git add deployed/backend.most      # committed in the SAME PR as the shape change
+```
+
+⚠️ **Read the diff with the script, never with your eyes.** A compiler upgrade renumbers
+every type hash in the file: moc 1.9.0 → 1.15.1 moved **91 of ~260 lines** without
+changing a single field. A real schema change lands in the same file, in the same shape of
+diff, and is invisible inside that noise — which is the mirror image of the stale-baseline
+hole above, and just as green.
+
+`scripts/check-stable-promotion.sh` decides it instead, by running
+`moc --stable-compatible` **both ways**. Mutual compatibility means the two signatures are
+mutual subtypes, i.e. equivalent, so the diff is pure renumbering. Its three verdicts, each
+probed against a deliberate mutation rather than assumed:
+
+| Verdict | Means | Do |
+|---|---|---|
+| `REPRESENTATION-ONLY` | both directions pass — equivalent signatures | promote without review; note the compiler bump in the commit |
+| `REAL shape change (upgrade-compatible)` | forward only — a field was added or widened | promote deliberately, and **name what moved** in the commit |
+| `NOT upgrade-compatible` | forward fails — a deployed canister cannot take it | not a promotion. Reinstall pre-launch, or write the migration |
+
+⚠️ **This is correct ONLY while the shape change is accompanied by a reinstall — and
+nothing in the toolchain will tell you when that stops being true.** Pre-launch,
+re-promoting is the right answer to a failed check every single time, which is exactly how
+it becomes a reflex. Once the canister holds data that cannot be recreated, the command
+still succeeds, the check goes green, and the incompatibility is blessed against real data.
+**The remedy for the failure is the command that erases the evidence of it.**
+
+After that point a failed check means *write a migration* (`docs/OPERATE.md`, Mode 3). ⚠️ **The trigger is a
+state, not a date:** the first mainnet deploy you intend to keep, or the first real buyer's
+order. Until then reinstall is free and the chain buys nothing; after then `mops deployed`
+is silently the wrong answer.
+
+⚠️ **The baseline must be committed, and it must not be the build's own output.**
+`src/backend/dist/backend.most` is gitignored with the rest of `dist/`, so configuring the
+check against it compares an artifact to a fresh regeneration of itself — measured before
+this was wired: it PASSED on the very change the real baseline rejects. `mops check` fails
+when `deployed/backend.most` is absent (`Deployed file not found`), which is what stops a
+missing or uncommitted baseline from reading as a clean check.
+
+⚠️ **Do not annotate the `.most`.** It is parsed, and the check is an equality comparison
+against a build artifact — commit it verbatim. The commit message is where the reason goes.
+
+**A committed baseline does double duty:** the check answers *is this safe*, and the diff
+answers *did the stable shape change at all* — the second is the question a reviewer can
+act on without re-deriving the first.
+
+The individual steps, if you need to run one in isolation:
+
+```sh
+mops check                                   # lint + typecheck
+mops test                                    # Motoko unit suites
+mops build                                   # refreshes the committed .did
+scripts/check-doc-surface.py                 # docs' method lists vs the .did
+scripts/check-design-sections.py             # §N citations vs docs/DESIGN.md
+npm --prefix src/frontend run build          # regenerates bindings
+npm --prefix src/frontend run typecheck
+npm --prefix src/frontend run test           # pure functions + jsdom (main.ts)
+bash scripts/brand-lint.sh                   # banned characters, vocabulary, tokens
+npm --prefix test/browser test               # Chromium: cascade, layout, paint
+npm --prefix test/integration run typecheck   # vitest does not typecheck
+scripts/sweep-vocabulary.py                  # added lines vs the deleted-mechanism list
+mops deployed                                # promote the stable baseline after a shape change
+npm --prefix test/integration test           # PocketIC scenarios — the go-live bar
+```
+
+⚠️ **No frontend change is done on a jsdom pass alone.** jsdom has no cascade and
+no layout, so `el.hidden` reads true for an element a class selector is keeping on
+screen — that has shipped twice. The browser suite is not optional and the gate
+now fails outright if it cannot run. Surfaces that need a session or a delivered
+order are reachable through the test-only fixture hook
+(`src/frontend/src/fixtures.ts`); see `test/browser/delivered.spec.ts`.
+
+⚠️ **`npm test`, never `npx vitest run`** for the integration suite: the latter
+skips `pretest`, which fetches the sha256-pinned wasms and rebuilds the backend —
+so it silently tests a stale wasm and passes.
+
+The PocketIC suite needs a **4 KiB-page host** (macOS or x86_64 Linux). It
+cannot run in arm64 Linux guests with 16 KiB pages — the replica hard-asserts
+4096-byte pages and the server dies at instance creation. If you cannot run it,
+say the bar is unverified; do not infer it from the unit tests.

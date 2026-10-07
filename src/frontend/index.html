@@ -3,126 +3,1111 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CyclePay — cycles, on-chain</title>
+    <title>From zero to deployed on the Internet Computer</title>
+    <meta
+      name="description"
+      content="Get cycles with a card, link your identity to the CLI, and deploy. No exchange account, no separate token to manage."
+    />
+    <meta name="theme-color" content="#faf9f5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#14110d" media="(prefers-color-scheme: dark)" />
+    <!-- SVG only, and no .ico fallback: every browser this app supports reads an SVG
+         icon (Safari since 16), and a second rasterised copy is a second thing to keep
+         in step with the brand. The CSP allows it: img-src is 'self'. -->
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/src/fonts.css" />
+    <link rel="stylesheet" href="/src/tokens.css" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <header>
-      <div class="brand">
-        <h1>CyclePay</h1>
-        <p class="tagline">Card or ck-USDC → cycles, verifiably on-chain</p>
+    <header class="site-header">
+      <a class="wordmark" href="/">
+        <span class="eyebrow">Internet Computer</span>
+      </a>
+      <div class="header-actions">
+        <a id="history-link" class="header-link" href="#/history" hidden>Dashboard</a>
+        <!-- NOTE: Shown ONLY to a granted admin or a controller, from `admin_status` -
+             which is a public, caller-scoped query, so asking costs nothing and
+             reveals nothing about anyone else. That conditionality is what makes the
+             link compatible with `view.ts`'s rule that the console is not advertised:
+             a visitor who is not an operator never sees it, so it is not noise for
+             them. Before this, an operator had to know to type `#/admin`. -->
+        <a id="admin-nav" class="header-link" href="#/admin" hidden>Admin</a>
+        <!-- Icon, and the glyph is set by `renderTheme` because it depends on which
+             theme is active. NOTE: "Dashboard" and "Sign out" stay as WORDS: this
+             audience is buying cycles with a card for the first time, and an all-icon
+             header makes them guess. Icons where the meaning is universal, words
+             where it is not. -->
+        <button id="theme-toggle" type="button" class="ghost icon-only"></button>
+        <div id="auth-area"></div>
       </div>
-      <div id="auth-area"></div>
     </header>
 
     <main>
-      <nav class="rails" aria-label="Payment rail">
-        <button id="rail-card" class="rail active" type="button">Card</button>
-        <button id="rail-ckusdc" class="rail" type="button">ck-USDC</button>
-      </nav>
+      <!-- ── Banners: above every view, because they are about the whole page ──
+           NOTE: **These used to sit AFTER `#view-landing` in the document**, so on the
+           landing view they rendered below the entire page: a notice saying "you
+           cannot buy here" arriving under the fold, after the thing it is about.
+           Nothing hid them; the DOM order did.
 
-      <div id="gate-notice" class="notice" hidden></div>
+           They belong above the views because none of them is view-specific: a
+           blocked sign-in, a gateway refusing every buyer, and a scaled simulation
+           are all facts about the visit, not about the screen. -->
+      <div id="banners">
+        <!-- Sign-in started from the HEADER has no form beneath it to report into,
+             and the header itself is too small for a sentence. -->
+        <p id="auth-error" class="error" hidden></p>
+        <!-- The gate refusing every buyer: not on the allow-list, or the gateway is
+             unbounded and refusing everyone. -->
+        <div id="gate-notice" class="notice" hidden></div>
+        <!-- Simulation mode, in words rather than as a badge: a badge tells
+             you a state exists, a sentence tells you what it means for the purchase
+             you are about to make. Hidden entirely at divisor 1, so a production
+             page reads exactly as it did before this existed. -->
+        <p id="simulation-note" class="notice" hidden></p>
+      </div>
 
-      <section id="card-panel">
-        <h2>Pick an amount</h2>
-        <div id="tiers" class="tiers">
-          <p class="muted">Loading tiers…</p>
-        </div>
-        <p id="rate-line" class="muted"></p>
-      </section>
+      <div id="view-landing" class="view">
+      <!-- Hero. The sequence is the product, not the purchase. -->
+      <section class="hero">
+        <div class="hero-copy">
+          <!-- The eyebrow said "CYCLES" above a heading that already says what this
+               is. And the lede restated all four steps in prose, immediately beside a
+               figure of the same four steps: so it is a claim now, not a summary. -->
+          <h1>From zero to deployed on the <em>Internet Computer</em>.</h1>
+          <p class="lede">
+            Your canisters live on mainnet in a few minutes, paid for with a credit card.
+          </p>
+          <!-- IMPORTANT: The action lives INSIDE the argument column, on a row with
+               its own qualifier, and it used to be a sibling of the whole hero
+               section. Outside the frame it read as leftover: the grid border closed
+               above it, a gap opened below it before the stats, and it terminated
+               neither column of a two-column layout. The reader's eye went left
+               column, then right column (numbered steps pull hard), then had to come
+               back down and left to find the only thing to do.
 
-      <section id="ck-panel" hidden>
-        <div id="ck-disabled-notice" class="notice" hidden>
-          The ck-USDC rail is not enabled yet — check back soon.
-        </div>
-        <h2>Choose an amount</h2>
-        <label class="amount-label">
-          Amount (USD)
-          <input id="ck-amount" type="text" inputmode="decimal" placeholder="5.00" autocomplete="off" spellcheck="false" />
-        </label>
-        <p id="ck-bounds-line" class="muted"></p>
-      </section>
+               On a row rather than stacked under the prose: the button leads and the
+               price qualifier sits beside it as fine print, which is where fine print
+               belongs relative to what it qualifies. One gesture, not three blocks.
 
-      <section>
-        <form id="order-form">
-          <h2>Where should the cycles go?</h2>
-          <label class="radio">
-            <input type="radio" name="dest-kind" value="canister" checked />
-            Top up a canister
-          </label>
-          <label class="radio">
-            <input type="radio" name="dest-kind" value="cyclesLedgerAccount" />
-            Credit a cycles-ledger account
-          </label>
-
-          <div id="dest-canister" class="dest-fields">
-            <label>
-              Canister id
-              <input id="canister-principal" type="text" placeholder="aaaaa-aa" autocomplete="off" spellcheck="false" />
-            </label>
+               The highlight is POSITION and ISOLATION, not more colour. On a
+               near-black page this is the only saturated element on screen; a wash or
+               a glow behind it would lower its contrast against its own surroundings.
+               A hairline rule separates the action from the prose instead. -->
+          <div class="hero-action">
+            <button id="start-buy" type="button" class="cta cta-hero">Buy cycles</button>
+            <p class="meta-strip hero-action-note">
+              <span id="rate-claim">At the protocol exchange rate, plus card processing.</span>
+            </p>
           </div>
-          <div id="dest-ledger" class="dest-fields" hidden>
-            <label>
-              Account owner principal
-              <input id="ledger-owner" type="text" autocomplete="off" spellcheck="false" />
-            </label>
-            <label>
-              Subaccount (hex, optional)
-              <input id="ledger-subaccount" type="text" placeholder="leave empty for default" autocomplete="off" spellcheck="false" />
-            </label>
-          </div>
+        </div>
 
-          <p id="form-error" class="error" hidden></p>
-          <button id="create-order" type="submit" disabled>Sign in to continue</button>
-        </form>
+        <!-- The four steps as a figure rather than a wrapping sentence. The
+             sequence IS the product, so it gets the visual weight the
+             right-hand column was wasting. Motion is CSS-only and cycles slowly;
+             prefers-reduced-motion drops it to a static, fully-legible state. -->
+        <ol class="flow" aria-label="What this takes">
+          <li class="flow-step" style="--i: 0">
+            <span class="flow-node"><span class="flow-n">1</span></span>
+            <span class="flow-body">
+              <span class="flow-label">Sign in</span>
+              <span class="flow-detail">Google, Apple, or Microsoft</span>
+            </span>
+          </li>
+          <li class="flow-step" style="--i: 1">
+            <span class="flow-node"><span class="flow-n">2</span></span>
+            <span class="flow-body">
+              <span class="flow-label">Pay with credit card</span>
+              <span class="flow-detail">No exchange account needed</span>
+            </span>
+          </li>
+          <li class="flow-step" style="--i: 2">
+            <span class="flow-node"><span class="flow-n">3</span></span>
+            <span class="flow-body">
+              <span class="flow-label">Link the CLI</span>
+              <code class="flow-detail">icp identity link web</code>
+            </span>
+          </li>
+          <li class="flow-step" style="--i: 3">
+            <span class="flow-node"><span class="flow-n">4</span></span>
+            <span class="flow-body">
+              <span class="flow-label">Deploy</span>
+              <code class="flow-detail">icp deploy -e ic</code>
+            </span>
+          </li>
+        </ol>
       </section>
+
+      <!-- ── The stats, promoted ────────────────────────────────────────────────
+           Moved up from the bottom and given the page's largest numerals, because
+           they are the only thing here a visitor can check without trusting us.
+
+           NOTE: **The framing line stays.** These are TWO DIFFERENT KINDS of number
+           and the difference is the whole point: available capacity is read from
+           the cycles ledger, which anyone can query without our cooperation, while
+           the delivered totals are ours to report. Bare numbers are decoration;
+           one line of frame makes them evidence. That is why the "Checkable by
+           anyone" prose could go and this sentence could not.
+
+           Both are shown unconditionally, zero included: a figure that disappears
+           when the news is bad is worse than one that reads low. -->
+      <section class="trust-block">
+        <dl id="trust-figures" class="trust-figures" hidden>
+          <div>
+            <dt id="trust-capacity-label"></dt>
+            <dd id="trust-capacity" class="figure"></dd>
+            <!-- NOTE: in simulation mode this figure is REAL reserve cycles
+                 while quotes are scaled, so the ratio between them is startling
+                 and correct. One sentence, or it reads as a bug. -->
+          </div>
+          <div id="trust-delivered-wrap">
+            <dt>Delivered so far</dt>
+            <!-- NOTE: ONE number at figure size, not three. This read
+                 "N orders · X cycles · $Y" and at the promoted size it wrapped
+                 mid-figure: three quantities competing at the scale meant for one.
+                 The cycles delivered is the product's number; the count and the
+                 revenue are context and sit small beneath it. -->
+            <dd id="trust-delivered" class="figure"></dd>
+            <dd id="trust-delivered-note" class="muted"></dd>
+          </div>
+        </dl>
+        <!-- IMPORTANT: The claim is now a LINK, not an assertion. "Anyone can query
+             this without us" is the whole posture of these figures, and a sentence
+             saying so while making the reader find the account themselves is asking
+             for trust in the very place it offers verification. The href is built by
+             `renderTrustFigures` because it needs this deployment's own canister id. -->
+        <p class="muted trust-frame">
+          Capacity is read from the cycles ledger, which anyone can query without us:
+          <a id="reserve-account-link" target="_blank" rel="noopener noreferrer"
+             href="https://dashboard.internetcomputer.org/tokens/um5iw-rqaaa-aaaaq-qaaba-cai">see
+            the reserve account &#8599;</a>.
+          Delivered totals are ours to report.
+        </p>
+      </section>
+
+      <!-- One explainer, for the reader who does not know what they are buying.
+           NOTE: "Nothing to run but your code" was Internet Computer marketing rather
+           than this product's job, and "Build with an agent" moves to the
+           next-steps page: it is guidance for after the purchase, not a reason to
+           make one. Neither is deleted from the product; one is deleted from HERE. -->
+      <section class="explainer sunk">
+        <h2 class="section-h">What cycles are</h2>
+        <p>
+          Cycles are prepaid credits that pay for your app's computation and
+          storage on the
+          <a href="https://internetcomputer.org" target="_blank" rel="noopener noreferrer">Internet&nbsp;Computer&nbsp;↗</a>.
+        </p>
+      </section>
+</div><!-- /view-landing -->
+
+
+      <div id="buy-flow" class="view" hidden>
+        <section id="card-panel">
+          <h2 class="section-h">Pick an amount</h2>
+          <div id="tiers" class="tiers">
+            <p class="muted">Loading amounts…</p>
+          </div>
+          <!-- A typed amount, bounded by the gate's own floor and ceiling, read
+               from the canister at load and never written down here. Picking a
+               tile clears this and typing clears the tile: "which amount" has one
+               answer.
+
+               IMPORTANT: The field is CLOSED until the Custom tile is chosen, and the
+               tile is the fourth member of the row above rather than a control beside
+               it. Four ways to name an amount, one row, one weight: an always-open
+               field competed with the presets for the same decision, and the label
+               "or enter an amount" had to explain a relationship the layout was
+               denying. -->
+          <div id="custom-panel" hidden>
+            <label class="amount-label" for="custom-amount">
+              <span id="custom-amount-range" class="muted">Loading amounts…</span>
+              <input id="custom-amount" type="text" inputmode="decimal"
+                     placeholder="25.00" autocomplete="off" spellcheck="false" disabled />
+            </label>
+            <p id="custom-amount-error" class="error" hidden></p>
+          </div>
+          <!-- IMPORTANT: The breakdown and the rate-lock policy are TWO elements. They
+               were one string joined with a space, so the page read "operator margin:
+               none The exchange rate is locked when you create the order": a
+               dot-separated data line running straight into a 150-character sentence,
+               with "none The" reading as one phrase. A data line and a policy note are
+               not the same kind of content and never belonged in one node. -->
+          <!-- IMPORTANT: The chosen amount's detail, and it is the SAME card the order
+               page shows after locking. Deliberate reuse: the preview and the receipt
+               are the same object at two moments, so a buyer who read one recognises
+               the other, and the two cannot drift into disagreeing layouts.
+
+               This replaced three muted lines that overlapped each other. The first was
+               the split as sideways prose ("charged · processing · buys cycles ·
+               margin"), which is a table written on one line: nothing lines up and
+               nothing can be compared down a column. The second was the rate-lock
+               sentence. The third was a rate strip that repeated the fee AND the lock
+               statement the two above it had already made. -->
+          <div id="amount-detail" class="checkout-summary" hidden>
+            <dl class="checkout-amounts">
+              <div>
+                <dt>You pay</dt>
+                <dd id="detail-pay" class="amount"></dd>
+              </div>
+              <div>
+                <dt>You receive</dt>
+                <dd id="detail-receive" class="amount"></dd>
+              </div>
+            </dl>
+            <p id="detail-fee-note" class="muted fee-note" hidden></p>
+            <dl class="checkout-terms">
+              <div><dt>Payment processing</dt><dd id="detail-processing"></dd></div>
+              <div><dt>Buys cycles</dt><dd id="detail-net"></dd></div>
+              <div><dt>Operator margin</dt><dd id="detail-margin"></dd></div>
+              <div><dt>Rate</dt><dd id="detail-rate" class="mono"></dd></div>
+            </dl>
+          </div>
+          <!-- The amount cannot carry the processor's fee at all: not a formatting
+               variant of the card, so it is its own line and the card stays hidden. -->
+          <p id="amount-too-small" class="error" hidden></p>
+          <p id="rate-lock-note" class="muted" hidden></p>
+          <p id="quote-notice" class="notice" hidden></p>
+          <!-- IMPORTANT: ONLY the no-rate notice now. It used to also print the rate,
+               the fee and the lock statement, all of which the card above states. It
+               remains the single owner of "there is no rate", which is why it is not
+               folded into the card: when there is no rate there is no card. -->
+          <p id="rate-line" class="muted"></p>
+        </section>
+
+        <section>
+          <form id="order-form">
+            <!-- IMPORTANT: "Where the cycles go" is GONE from this view. It was a
+                 heading, a sentence and a fee note explaining a destination the buyer
+                 cannot change: cycles go to the signed-in principal's own
+                 cycles-ledger account and the gateway refuses anything else. All
+                 of it is stated on the order the buyer is about to create, where the
+                 card carries Destination and the deposit fee as a sub-line under the
+                 quantity it explains. A section answering an unaskable question sat
+                 between the amount and the button that acts on it.
+
+                 A destination input belongs here only if `Types.Destination` grows a
+                 case to justify one. -->
+            <p id="form-error" class="error" hidden></p>
+            <button id="create-order" type="submit" class="cta cta-buy" disabled>Sign in to continue</button>
+            <div id="signin-providers" class="providers" hidden>
+              <p class="muted">
+                Sign in with Google, Apple, or Microsoft, or use a passkey. Your
+                account is created on first sign-in.
+              </p>
+            </div>
+          </form>
+        </section>
+      </div>
 
       <section id="active-order" hidden>
-        <h2>Order <span id="order-id-short"></span></h2>
-        <ol id="timeline" class="timeline"></ol>
-        <p id="order-status-line"></p>
-        <div id="pay-area" hidden>
-          <a id="pay-link" target="_blank" rel="noopener noreferrer" class="pay-button">Pay with card</a>
-          <p class="muted">
-            The payment page is a Stripe Payment Link carrying reference
-            <code id="client-ref"></code> — keep this tab open; status updates live.
+        <!-- IMPORTANT: **The heading is the PURCHASE, not the id.** An order id led this page
+             as an h2, which put an opaque identifier where a buyer looks for what they
+             are being asked to authorise. The id is a support handle: demoted to a
+             muted line, truncated, and copyable, which is the only thing anyone
+             actually does with it. Status-neutral wording, because this one section
+             serves every status the order can be in. -->
+        <!-- IMPORTANT: The status is a BADGE beside the heading, and the three-step
+             timeline it replaces is gone. A progress bar for a three-state pipeline
+             whose state is already named in words, next to the one action that state
+             allows, is decoration: on a delivered order every segment was lit and it
+             carried nothing. Status has one owner now. What is lost: a paid order no
+             longer shows "1 of 3 done" graphically, and reads "Paid" instead. -->
+        <!-- IMPORTANT: The heading is the OUTCOME, and the badge that used to sit in
+             the far corner is gone rather than relocated. "Your purchase" plus a small
+             DELIVERED pill answered the one question a buyer has - did I get my cycles -
+             three times and prominently zero times: the pill, a receipt row, and a
+             block index. `statusInfo(...).headline` names the state and the quantity in
+             one statement, so the page announces itself. -->
+        <h2 id="order-headline" class="section-h"></h2>
+        <p class="order-ident muted">
+          Order <span id="order-id-short" class="mono"></span>
+        </p>
+        <p id="order-lock-notice" class="notice" hidden></p>
+        <!-- IMPORTANT: **Only for a status the timeline CANNOT express.** This printed the same
+             label as the timeline's current step, so an awaiting-payment order said so
+             twice in adjacent lines. The timeline covers created, paid and delivered;
+             cancelled, expired, abandoned and needsReview are outside it, and there
+             this line is the only statement of what happened. See `renderOrder`. -->
+        <p id="order-status-line" hidden></p>
+
+        <!-- IMPORTANT: **The amounts lead, and the reading order was the bug.** A buyer was
+             asked to click "Pay with card" some 350px above learning the charge was
+             $10.00: the figures sat in a monospace list BELOW both buttons, every row
+             at one weight, so the price had exactly the prominence of a 90-character
+             support identifier. A checkout states what is being authorised, then
+             offers the control. -->
+        <div class="checkout-summary">
+          <dl class="checkout-amounts">
+            <div>
+              <!-- Tense follows the order: see `amountLabels`. Two independent facts,
+                   because a paid order has paid but has not yet received. -->
+              <dt id="order-pay-label">You pay</dt>
+              <dd id="order-price" class="amount"></dd>
+            </div>
+            <div>
+              <dt id="order-receive-label">You receive</dt>
+              <dd id="order-cycles" class="amount"></dd>
+            </div>
+          </dl>
+          <!-- IMPORTANT: **Kept, though it is detail.** Why the credited figure is smaller than
+               the quantity bought is the one arithmetic gap that reads as being
+               short-changed if left unexplained, so it stays: as a sub-line under the
+               figure it explains, not as prose inside a value cell. -->
+          <p id="order-cycles-note" class="muted fee-note" hidden></p>
+          <!-- IMPORTANT: The receipt's own facts live HERE, not in a second list
+               below. "You pay $10.00" and "You paid $10.00" were the same number
+               rendered twice by two code paths, as were the cycles; the block index and
+               the source count had no reason to sit apart from the terms they belong
+               to. What stays below is the arithmetic, which answers a different
+               question: these are the facts, that is the proof. -->
+          <dl class="checkout-terms">
+            <div><dt>Rate</dt><dd id="order-rate" class="mono"></dd></div>
+            <div><dt>Destination</dt><dd id="order-dest"></dd></div>
+            <div id="term-block" hidden><dt>Cycles ledger block</dt><dd id="receipt-block"></dd></div>
+            <div id="term-sources" hidden><dt>Priced from</dt><dd id="receipt-sources"></dd></div>
+          </dl>
+          <!-- A live countdown, not a static "reserved until 14:32": thirty-five
+               minutes is short enough that a stale timestamp misleads a buyer who
+               looked away. Rendered from `expiresAtNs`, which is Stripe's own
+               deadline. Inside the summary because it is a term of this price. -->
+          <p id="order-deadline" class="muted" hidden></p>
+
+          <!-- IMPORTANT: In the card, because it is an order FACT like the block index.
+               Outside it, it was one more line of prose under a tidy frame. -->
+          <p class="order-ref muted">
+            Payment reference <span id="client-ref" class="mono"></span>
           </p>
-        </div>
-        <div id="ck-pay-area" hidden>
-          <p>
-            Pay <strong id="ck-pay-amount"></strong> from your ck-USDC account:
-            approve the gateway to pull it, then claim.
-          </p>
-          <div class="ck-actions">
-            <button id="ck-approve" type="button" class="primary">1 · Approve</button>
-            <button id="ck-claim" type="button">2 · Claim</button>
+
+          <!-- IMPORTANT: The next step is ANCHORED in the card, not floating below it.
+               It was a two-word label on an 870px button between the frame and a wall
+               of prose, with its own explanation underneath, so the pair anchored to
+               nothing. The card is what a buyer reads and trusts; the action belongs at
+               its end, the same reasoning as the landing hero.
+
+               "Spend them" was wrong: cycles pay for CREATING and running canisters,
+               which is what the caption says now. -->
+          <div id="order-next-row" class="card-action" hidden>
+            <p class="muted">Create and deploy canisters from your terminal.</p>
+            <a id="order-next-link" class="cta" href="#/">Link ICP CLI</a>
           </div>
-          <p id="ck-flow-status" class="muted" hidden></p>
         </div>
-        <dl class="order-facts">
-          <dt>Rail</dt><dd id="order-rail"></dd>
-          <dt>Cycles</dt><dd id="order-cycles"></dd>
-          <dt>Price</dt><dd id="order-price"></dd>
-          <dt>Destination</dt><dd id="order-dest"></dd>
-        </dl>
+
+        <!-- IMPORTANT: **The two actions are ALTERNATIVES, so they share a row.** Each used to
+             be followed by its own explanatory paragraph, which put sixty words between
+             them and made two choices read as two unrelated controls. Cancel keeps a
+             destructive tint rather than a filled fill: filled red beside a filled
+             accent gives a page two loud buttons and shouts the option a buyer is less
+             likely to want. -->
+        <div class="order-actions">
+          <div id="pay-area" hidden>
+            <!-- IMPORTANT: Same tab, deliberately. A new tab meant Stripe's post-payment
+                 redirect landed in THAT tab, leaving the buyer with two order pages and
+                 no relationship between them. Returning here is safe because
+                 `stripeSessionUrl` lives on the order record, so a back
+                 button, a reload or a deep link all restore the pay button.
+
+                 `rel="noreferrer"` is KEPT: dropping the whole rel attribute along with
+                 the target would also have stopped suppressing the Referer, so Stripe
+                 would start receiving the order page URL. Benign (fragments are not sent,
+                 and Stripe already holds the session and the client reference) but it was
+                 not a change anyone chose. `noopener` is unnecessary without a target. -->
+            <a id="pay-link" rel="noreferrer" class="cta">Pay with card</a>
+          </div>
+          <div id="cancel-area" hidden>
+            <button id="cancel-order" type="button" class="ghost danger">Cancel this order</button>
+          </div>
+        </div>
+        <!-- IMPORTANT: Shown by the SAME predicate as `#pay-area` (see `renderOrder`): it is a
+             note about that button, and a note outliving its control is a claim about a
+             control that is not there. -->
+        <p id="pay-note" class="muted" hidden>
+          Opens Stripe's payment page. You come back here when the payment clears.
+        </p>
+        <p id="cancel-status" class="error" hidden></p>
+
+        <!-- The guided tour. On delivery this is the point of the page: the two
+             commands ARE the deliverable, so they lead and the order facts
+             collapse beneath them. Every delivered order gets it, because every
+             order credits the buyer's own account. -->
+        <!-- NOTE: order details, problems and the receipt are SIBLINGS now, and none of
+             them is inside a disclosure.
+
+             They used to be nested: `order-problems` and `receipt-area` sat INSIDE
+             `<details id="order-details">`, which main.ts collapsed on the delivered
+             view. So on the one view a buyer opens to see what they got, the page
+             showed no cycle quantity at all, the receipt was two clicks deep, and a
+             problem notice hid behind one. Nothing hid them; the nesting did, and it
+             looked like an indentation accident rather than a decision.
+
+             The order view is now a record: what you bought, what went wrong if
+             anything, and the arithmetic you can check. The next action lives on its
+             own page. -->
+        <!-- Problems attached to this order. Hidden when there are none,
+             which is the normal case: an empty panel headed "Problems" reads as a
+             fault on every healthy order. -->
+        <section id="order-problems" class="notice" hidden>
+          <h3 class="section-h">What happened to this order</h3>
+          <ul id="order-problem-list"></ul>
+        </section>
+
+        <!-- The receipt, OPEN rather than behind a summary. The landing page's whole
+             claim is that every order carries a receipt that recomputes its own price;
+             putting it behind a disclosure on the order page made the claim true and
+             the artefact hidden. -->
+        <section id="receipt-area" hidden>
+          <!-- IMPORTANT: The PROOF collapses; the FACTS do not, and that distinction is
+               the whole reason this is allowed to be a disclosure.
+
+               The rule this file carries is that the receipt must not sit behind one.
+               That rule exists because `order-problems` and `receipt-area` were once
+               nested inside a collapsed `<details>`, so the one page a buyer opens to
+               see what they got showed no cycle quantity at all and hid a problem
+               notice. Every one of those facts is now in the summary card above, open
+               and unconditional: the amounts, the rate, the destination, the ledger
+               block, the source count, the reference. What closes here is the
+               arithmetic a sceptic recomputes - long, secondary, and the only part of
+               this page a buyer can reasonably skip.
+
+               `#order-problems` stays OUTSIDE, open, for the same reason it was pulled
+               out: a fault must never need a click. -->
+          <!-- IMPORTANT: The VERDICT stays outside the disclosure, and a browser test
+               is why. "Verified: recomputed from these inputs, the price matches" is
+               the reassurance, not the arithmetic: collapsing it hid the trust signal
+               while leaving the long proof behind the same click, which is a strictly
+               worse trade. What closes is the formula and the how-to-check-it prose. -->
+          <p id="receipt-verdict"></p>
+          <details id="receipt-details">
+            <summary>Show the arithmetic</summary>
+          <p id="receipt-formula" class="mono"></p>
+          <p class="muted">
+            Both rates come from canisters you can query yourself: the
+            <a href="https://dashboard.internetcomputer.org/canister/uf6dk-hyaaa-aaaaq-qaaaq-cai"
+               target="_blank" rel="noopener noreferrer">Exchange Rate Canister &#8599;</a>
+            for USD/ICP and the Cycles Minting Canister for XDR/ICP. Recompute the
+            line above and it must match the cycles this order locked.
+          </p>
+          </details>
+        </section>
+
+        <!-- The quiet route out, matching the CLI page. NOT a prominent Dashboard
+             button: the header carries Dashboard on every page, so a loud one here
+             would duplicate the nav. -->
+        <p><a id="order-back" href="#/history">Back to your dashboard</a></p>
+
+
       </section>
 
-      <section id="history" hidden>
-        <h2>Your orders</h2>
-        <table>
+      <!-- The CLI page (#/cli). NOTE: the tour used to live on the order record, where
+           it dominated the page and pushed every number behind a collapsed disclosure.
+           Two questions, two pages: the order says what you bought, this says what to
+           do with it.
+
+           IMPORTANT: NOT scoped to an order any more. Everything here is derived from
+           the signed-in identity, and the balance comes from the ledger, so it is
+           reachable from the dashboard by someone who bought cycles last week. That
+           is also why the four-step strip is absent: it narrates one purchase
+           journey, and a visitor arriving here may not be on it. -->
+      <section id="view-cli" class="view" hidden>
+        <h2 class="section-h">Link the ICP CLI</h2>
+        <p class="lede" id="cli-summary"></p>
+
+        <!-- IMPORTANT: NUMBERED steps, one treatment each. This was two cards with two
+             different visual treatments covering four commands: the first card held a
+             command, a fact, a second command and two paragraphs of caveats, and the
+             second had an accent rail for no reason the content justified. Nothing said
+             what order to do things in, and step 2 was missing outright.
+
+             An `<ol>`, so the sequence is the markup rather than a visual convention,
+             and screen readers announce the position. -->
+        <ol id="cli-steps" class="cli-steps">
+          <!-- IMPORTANT: The prerequisite is STEP ONE, inside the list, not a panel
+               above it. It was a "Before you start" note, and a note above a numbered
+               procedure reads as optional preamble - but without this switch the link
+               command fails outright, so it is the first thing you do, numbered like
+               everything else and tinted so it does not look like the others.
+
+               It also names WHERE. Saying "enable CLI access for your Internet
+               Identity" and linking only the guide made a buyer read a docs page to
+               discover the switch lives in their id.ai settings. -->
+          <li class="step-prereq">
+            <h3 class="section-h">Enable CLI access on your identity</h3>
+            <p>
+              Open your
+              <a id="cli-settings" target="_blank" rel="noopener noreferrer" href="#/">id.ai settings &#8599;</a>
+              and turn on CLI access. Without it the next command fails: the sign-in
+              page says "CLI access not enabled" and never returns an identity.
+            </p>
+            <p class="muted">
+              <a id="cli-guide" target="_blank" rel="noopener noreferrer" href="#/">How this works &#8599;</a>
+            </p>
+          </li>
+
+          <li>
+            <h3 class="section-h">Link this site's identity to the CLI</h3>
+            <p class="muted">
+              This links the account your cycles are in, so the CLI acts as the same
+              identity this page is signed in as.
+            </p>
+            <div class="cmd">
+              <code id="cmd-link" class="mono"></code>
+              <button type="button" class="copy" data-copy="cmd-link"
+                      aria-label="Copy the identity link command"></button>
+            </div>
+          </li>
+
+          <li>
+            <h3 class="section-h">Make it the identity the CLI uses</h3>
+            <!-- IMPORTANT: The step that was MISSING. Without it a buyer links
+                 successfully, verifies, sees a match, then deploys as whatever their
+                 default identity was: a different principal with an empty balance. -->
+            <p class="muted">
+              Every command below acts as your default identity, so point it at the one
+              you just linked.
+            </p>
+            <div class="cmd">
+              <code id="cmd-default" class="mono"></code>
+              <button type="button" class="copy" data-copy="cmd-default"
+                      aria-label="Copy the set-default-identity command"></button>
+            </div>
+          </li>
+
+          <li>
+            <h3 class="section-h">Check it worked</h3>
+            <!-- IMPORTANT: Each command paired with the value THIS PAGE shows, which is
+                 the whole reason to verify here rather than in the docs: the buyer has
+                 both numbers in front of them. -->
+            <div class="cmd">
+              <code id="cmd-principal" class="mono"></code>
+              <button type="button" class="copy" data-copy="cmd-principal"
+                      aria-label="Copy the print-principal command"></button>
+            </div>
+            <p class="muted expect">
+              Must print
+              <code id="credited-principal" class="mono"></code>
+              <button type="button" class="copy copy-inline" data-copy="credited-principal"
+                      aria-label="Copy the principal your cycles are in"></button>
+            </p>
+            <div class="cmd">
+              <code id="cmd-balance" class="mono"></code>
+              <button type="button" class="copy" data-copy="cmd-balance"
+                      aria-label="Copy the check-balance command"></button>
+            </div>
+            <p class="muted expect">
+              Must match <span id="cli-expect-balance" class="mono"></span>
+            </p>
+            <p class="muted">
+              A different principal means the <code>--app</code> value was changed or left
+              out. Use it exactly as printed above: it names the origin your identity comes
+              from, which is not always the domain in your address bar.
+            </p>
+          </li>
+
+          <li>
+            <h3 class="section-h">Deploy to mainnet</h3>
+            <p class="muted">Run this in your own project.</p>
+            <div class="cmd">
+              <code id="cmd-deploy" class="mono"></code>
+              <button type="button" class="copy" data-copy="cmd-deploy"
+                      aria-label="Copy the deploy command"></button>
+            </div>
+            <p class="muted">
+              New to the tooling? Follow the
+              <a href="https://docs.internetcomputer.org/getting-started/quickstart"
+                 target="_blank" rel="noopener noreferrer">quickstart &#8599;</a>.
+            </p>
+          </li>
+        </ol>
+
+        <!-- Moved here from the landing page, not deleted. It is guidance for after the
+             purchase rather than a reason to make one, and it is still aimed at a human:
+             someone pointing their own coding agent at the tooling. -->
+        <!-- IMPORTANT: NOT `.explainer.sunk` here. That class breaks out to full bleed
+             with its own background fill, which works as a band on the landing page and
+             reads as a different page pasted on immediately after a numbered procedure.
+             A quiet aside with a rule instead: subordinate to the steps, not a new
+             section competing with them. -->
+        <aside class="cli-aside">
+          <h3 class="section-h">Building with an agent?</h3>
+          <p>
+            Point your coding agent at the
+            <a href="https://mcp.internetcomputer.org" target="_blank" rel="noopener noreferrer">MCP server &#8599;</a>
+            and the
+            <a href="https://skills.internetcomputer.org" target="_blank" rel="noopener noreferrer">skills library &#8599;</a>.
+          </p>
+        </aside>
+
+        <p><a id="cli-back" href="#/history">Back to your dashboard</a></p>
+      </section>
+
+      <section id="order-missing" class="view" hidden>
+        <h2 class="section-h">We could not find that order</h2>
+        <p id="order-missing-detail"></p>
+        <p><a href="#/history">Back to your dashboard</a></p>
+      </section>
+
+      <section id="history" class="view" hidden>
+        <h2 class="section-h">Your cycles</h2>
+
+        <!-- The balance, READ FROM THE LEDGER rather than from this canister.
+             NOTE: that is the point, not an optimisation. This is the one number a
+             buyer should never have to take our word for, and the cycles ledger is a
+             public canister anyone can query. It also closes the loop on the claim the
+             purchase flow makes: "your cycles go to your account" is checkable here. -->
+        <dl class="trust-figures balance-block">
+          <div>
+            <dt>Your cycles balance</dt>
+            <dd id="ledger-balance" class="figure">reading the ledger...</dd>
+            <dd id="ledger-balance-note" class="muted"></dd>
+          </div>
+        </dl>
+
+        <!-- IMPORTANT: The second entry point to the CLI page, and the reason that page
+             stopped being order-scoped. A buyer who bought cycles last week has no
+             order in mind: they want to spend the balance above. Beside the balance
+             because that is the thing the CLI acts on. -->
+        <p class="next-step">
+          <a id="cli-link" class="ghost" href="#/cli">Link ICP CLI</a>
+        </p>
+
+        <!-- Two RECORDS of the same money, one tab each. NOTE: the balance above sits
+             outside the tabs because it belongs to neither record, and the tabs are
+             LINKS rather than an ARIA tab widget because the selection is in the hash:
+             deep-linkable, survives a reload, and Back works. Faking `role="tab"` over
+             a router gives the keyboard two conflicting models. -->
+        <nav class="record-tabs" aria-label="Which record to show">
+          <a id="tab-orders" class="record-tab" href="#/history">Your orders</a>
+          <a id="tab-ledger" class="record-tab" href="#/history/ledger">Cycles ledger activity</a>
+        </nav>
+
+        <div id="panel-orders" class="record-panel">
+        <p class="muted">This gateway's own record of what you bought.</p>
+        <div class="table-scroll">
+        <table class="orders-table">
           <thead>
-            <tr><th>Created</th><th>Order</th><th>Rail</th><th>Cycles</th><th>Price</th><th>Status</th></tr>
+            <tr>
+              <!-- NOTE: no RAIL column. It read "card" on every row, because card is
+                   the only rail: a column with one value is a column that costs width
+                   and says nothing. And no ACTIONS column, because "Buy again" is
+                   gone: it appeared on every row including unpaid ones, where the
+                   open-order cap refuses the second order it was offering to start. -->
+              <th>Created</th><th>Order</th><th>Cycles</th>
+              <th>Price</th><th>Status</th>
+            </tr>
           </thead>
           <tbody id="orders"></tbody>
         </table>
+        </div>
+        <p class="muted">Select a row to see the order and its receipt.</p>
+        </div>
+
+        <!-- The ledger's own record for this account, from the cycles-ledger INDEX
+             canister. NOTE: from a canister rather than the dashboard's REST API, because
+             this page's claim is that its figures come from canisters anyone can
+             query. Every row links to the public dashboard so the entry can be read
+             somewhere that is not us. -->
+        <div id="panel-ledger" class="record-panel" hidden>
+          <p class="muted">
+            The cycles ledger's own record for your account, which anyone can verify.
+            It includes transfers this gateway had nothing to do with.
+          </p>
+          <div id="ledger-history"></div>
+        </div>
       </section>
+
+      <!-- The operator console, in FIVE panels rather than one column.
+           NOTE: It used to stack all of this: identity, configuration, actions, then the
+           summary, then the worklists. Someone opening it mid-incident scrolled past
+           their own principal and a config table to reach "what needs a person". The
+           panels are ordered by what is needed first, and `now` is the default.
+
+           Tabs are LINKS with `aria-current`, not an ARIA tab widget. Same reasoning as
+           the dashboard's record tabs: faking `role="tab"` over a hash router gives the
+           keyboard two conflicting models and stops the URL describing the page. -->
+      <section id="admin" class="view" hidden>
+        <h2 class="section-h">Operator console</h2>
+
+        <nav class="record-tabs" aria-label="Which part of the console to show">
+          <a id="atab-now" class="record-tab" href="#/admin">Now</a>
+          <!-- The count rides the TAB, so an operator sees there is work without
+               opening the panel. Empty and hidden when there is none: a "0" badge is
+               noise that trains you to ignore the badge. -->
+          <a id="atab-worklists" class="record-tab" href="#/admin/worklists">Worklists<span
+             id="atab-worklists-count" class="tab-count" hidden></span></a>
+          <a id="atab-orders" class="record-tab" href="#/admin/orders">Orders</a>
+          <a id="atab-diagnostics" class="record-tab" href="#/admin/diagnostics">Diagnostics</a>
+          <a id="atab-config" class="record-tab" href="#/admin/config">Configuration</a>
+        </nav>
+
+        <!-- ══ NOW ══ situational awareness, and nothing that takes an argument. -->
+        <div id="apanel-now" class="admin-panel">
+          <!-- The wait-versus-work distinction is carried by ORDER, HEADINGS and a token
+               colour, not by symbols: brand-lint bans pictographs in user-facing copy, and
+               the warning and tick glyphs that would otherwise do this job are pictographs.
+               So the groups say it in words, and the act group comes first.
+
+               Whether an operator can actually TELL THEM APART is a cascade-and-layout
+               property, so it is asserted in the Chromium suite. Note this comment itself
+               tripped the pictograph check: it reads all of index.html, comments included,
+               unlike the CSS check which strips them. -->
+          <section id="admin-summary">
+            <h3 class="section-h">Right now</h3>
+            <p id="summary-headline"></p>
+
+            <div class="summary-groups">
+              <section id="summary-act" class="summary-group">
+                <h4 class="summary-h">Needs a person</h4>
+                <p class="muted">Nothing in this group clears itself.</p>
+                <dl id="summary-act-figures" class="figures"></dl>
+              </section>
+
+              <section id="summary-wait" class="summary-group">
+                <h4 class="summary-h">In progress</h4>
+                <p class="muted">These clear on their own. Reading them is enough.</p>
+                <dl id="summary-wait-figures" class="figures"></dl>
+              </section>
+            </div>
+
+            <p id="summary-reserve" class="muted"></p>
+          </section>
+
+          <!-- Refusal counts are public and cheap, and they answer "is the gate turning
+               people away, and why". Seven counts against the gate's five reasons: railClosed
+               and stripeApiFailed refuse before an amount is considered. -->
+          <section id="admin-refusals">
+            <h3 class="section-h">Refusals since deploy</h3>
+            <div class="table-scroll">
+            <table class="wl-table">
+              <thead>
+                <tr>
+                  <th scope="col" data-sort="text">Reason</th>
+                  <th scope="col" data-sort="number">Count</th>
+                  <th scope="col">What this means</th>
+                </tr>
+              </thead>
+              <tbody class="worklist-rows" id="refusal-rows"></tbody>
+            </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ══ WORKLISTS ══ the queues a person acts on.
+             The two that need a person first, then the two that clear themselves. Each
+             row carries its state's meaning inline, from the hint tables in operator.ts,
+             so the console does not send anyone to RUNBOOK mid-incident.
+
+             NOTE: TABLES rather than lists, with columns specific to each queue. An
+             operator triaging compares rows on one field (how long has this waited, how
+             many attempts), which a list of stacked paragraphs cannot support. Sortable
+             where a column is ordinal; NOT paginated, because every one of these is
+             bounded by the reserve (§5.4) and will hold single digits. -->
+        <div id="apanel-worklists" class="admin-panel" hidden>
+          <section id="admin-worklists">
+            <h3 class="section-h">Worklists</h3>
+            <p id="worklists-locked" class="muted" hidden></p>
+
+            <div id="worklists" hidden>
+              <section class="worklist" id="wl-orphans">
+                <h4 class="summary-h">Payments not attributed</h4>
+                <p class="muted">Needs a person: money we took and cannot attribute.</p>
+                <p class="muted" id="wl-orphans-empty" hidden>None.</p>
+                <div class="table-scroll">
+                <table class="wl-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" data-sort="text">Payment</th>
+                      <th scope="col" data-sort="text">What happened</th>
+                      <th scope="col">What this means</th>
+                    </tr>
+                  </thead>
+                  <tbody class="worklist-rows" id="wl-orphans-rows"></tbody>
+                </table>
+                </div>
+              </section>
+
+              <section class="worklist" id="wl-problems">
+                <h4 class="summary-h">Orders carrying a problem</h4>
+                <p class="muted">Needs a person: each is a named obligation on one order.</p>
+                <p class="muted" id="wl-problems-empty" hidden>None.</p>
+                <div class="table-scroll">
+                <table class="wl-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" data-sort="text">Order</th>
+                      <th scope="col" data-sort="text">Problem</th>
+                      <th scope="col">What this means</th>
+                    </tr>
+                  </thead>
+                  <tbody class="worklist-rows" id="wl-problems-rows"></tbody>
+                </table>
+                </div>
+              </section>
+
+              <section class="worklist wait" id="wl-delayed">
+                <h4 class="summary-h">Deliveries past the alert threshold</h4>
+                <p class="muted" id="wl-delayed-note"></p>
+                <p class="muted" id="wl-delayed-empty" hidden>None.</p>
+                <div class="table-scroll">
+                <table class="wl-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" data-sort="text">Order</th>
+                      <th scope="col" data-sort="number">Waiting</th>
+                      <th scope="col" data-sort="number">Attempts</th>
+                      <th scope="col">What this means</th>
+                    </tr>
+                  </thead>
+                  <tbody class="worklist-rows" id="wl-delayed-rows"></tbody>
+                </table>
+                </div>
+              </section>
+
+              <section class="worklist wait" id="wl-pending">
+                <h4 class="summary-h">Deliveries outstanding</h4>
+                <p class="muted" id="wl-pending-note"></p>
+                <p class="muted" id="wl-pending-empty" hidden>None.</p>
+                <div class="table-scroll">
+                <table class="wl-table">
+                  <thead>
+                    <tr>
+                      <th scope="col" data-sort="text">Order</th>
+                      <th scope="col" data-sort="number">Attempts</th>
+                      <th scope="col" data-sort="text">Last error</th>
+                      <th scope="col">What this means</th>
+                    </tr>
+                  </thead>
+                  <tbody class="worklist-rows" id="wl-pending-rows"></tbody>
+                </table>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+
+        <!-- ══ ORDERS ══ the record, and lookup by id. -->
+        <div id="apanel-orders" class="admin-panel" hidden>
+          <!-- The whole order history, with the filters `admin_orders` already accepts.
+               Full Order records come back from that one call, so a row needs no follow-up
+               read: `admin_order` audits itself on every use and would flood the trail with
+               a line per page render. -->
+          <section id="admin-history">
+            <h3 class="section-h">Order history</h3>
+
+            <div id="history-filters">
+              <label for="filter-status">Status</label>
+              <select id="filter-status">
+                <option value="">Any</option>
+                <option value="created">created</option>
+                <option value="paid">paid</option>
+                <option value="delivered">delivered</option>
+                <option value="needsReview">needsReview</option>
+                <option value="abandoned">abandoned</option>
+                <option value="cancelled">cancelled</option>
+                <option value="expired">expired</option>
+              </select>
+              <label for="filter-problems">
+                <input type="checkbox" id="filter-problems" />
+                Only orders carrying an unresolved problem
+              </label>
+            </div>
+
+            <p id="admin-history-locked" class="muted" hidden></p>
+            <p id="admin-history-empty" class="muted" hidden>No orders match.</p>
+            <!-- Paginated for real: `admin_orders` takes `afterId` + `limit`, and this is
+                 the one operator list whose length is the order count rather than the
+                 outstanding work. Sorting is deliberately NOT offered here: it would sort
+                 the page in hand and read as sorting the record. -->
+            <div class="table-scroll">
+            <table class="wl-table">
+              <thead>
+                <tr>
+                  <th scope="col">Order</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Cycles</th>
+                  <th scope="col">Paid</th>
+                  <th scope="col">Created</th>
+                  <th scope="col">What this means</th>
+                </tr>
+              </thead>
+              <tbody class="worklist-rows" id="admin-history-rows"></tbody>
+            </table>
+            </div>
+            <button type="button" id="admin-history-more" hidden>Load more</button>
+          </section>
+
+          <!-- NOTE: The two AUDITED reads, which had no surface at all: RUNBOOK reaches for
+               both by name when reconciling a Stripe charge against an order, and the only
+               route was an `icp canister call` typed by hand. They are updates so that the
+               read itself is audited, which is exactly why they are behind a
+               deliberate button rather than fetched on panel open. One line in the audit
+               trail per render would make the trail useless. -->
+          <section id="admin-lookup">
+            <h3 class="section-h">Look up one order</h3>
+            <p class="muted">
+              Reads the full record and its receipt. Each use writes a line to the audit
+              trail, on purpose, so run it when you mean to.
+            </p>
+            <div class="lookup-row">
+              <label for="lookup-id">Order id</label>
+              <input type="text" id="lookup-id" inputmode="latin" autocomplete="off"
+                     placeholder="32 hex characters" />
+              <button type="button" id="lookup-run">Look up</button>
+            </div>
+            <p id="lookup-state" class="muted" hidden></p>
+            <div id="lookup-result" hidden></div>
+            <!-- The delivery journal entry for the same id, fetched alongside: it is a
+                 per-order read (`delivery_journal(id)`), not a list, so this is where it
+                 belongs rather than on the diagnostics panel. -->
+            <dl id="lookup-journal" class="figures" hidden></dl>
+          </section>
+        </div>
+
+        <!-- ══ DIAGNOSTICS ══ read-only state the RUNBOOK asks for by name.
+             NOTE: None of this had a surface. `recovery_status` is named 18 times in RUNBOOK,
+             `orphan_depth` 7, `health` 6, and the only way to read any of them was an
+             `icp canister call` typed by hand, mid-incident. -->
+        <div id="apanel-diagnostics" class="admin-panel" hidden>
+          <!-- Same shape as the worklists' locked state: one message for the panel, and
+               the body hidden behind it. Annotating four sections individually left three
+               of them as a heading over prose over nothing, which reads as broken rather
+               than as refused. -->
+          <p id="diag-locked" class="muted" hidden></p>
+
+          <div id="diagnostics-body">
+          <!-- NOTE: `health()` returns a single BOOLEAN, not a per-subsystem report. Rendered
+               as one sentence rather than a figure list, because a `<dl>` with one row
+               implies there are others and invites someone to add a second reading that
+               the canister does not provide. -->
+          <section id="diag-health">
+            <h3 class="section-h">Health</h3>
+            <p id="diag-health-state">reading...</p>
+            <p class="muted">
+              The canister's own liveness answer, and the read to take before concluding
+              anything else is wrong. It says nothing about the rail being live. That is
+              the rail state on the Now panel.
+            </p>
+          </section>
+
+          <section id="diag-depths">
+            <h3 class="section-h">Queue depths</h3>
+            <p class="muted">
+              How much unresolved work exists, counted by the canister rather than by
+              paging through a list.
+            </p>
+            <dl id="diag-depth-figures" class="figures"></dl>
+          </section>
+
+          <section id="diag-recovery">
+            <h3 class="section-h">Recovery sweep</h3>
+            <p class="muted">
+              The index scan that repairs stranded orders: where it is, how long a full
+              cycle takes, and what the last completed one did.
+            </p>
+            <dl id="diag-recovery-figures" class="figures"></dl>
+            <p id="diag-recovery-drift" class="muted"></p>
+          </section>
+
+          <!-- NOTE: The one table here that GENUINELY needs paging. The audit log grows
+               without bound: a line per admin action, per audited read, forever, and the
+               canister already offers `afterSeq` + `limit`. Everything else on this panel
+               is bounded by the reserve or by a variant. -->
+          <section id="diag-audit">
+            <h3 class="section-h">Audit trail</h3>
+            <p class="muted">
+              Every operator action and audited read, newest first. This is the only list
+              here that grows without bound, so it pages.
+            </p>
+            <p id="diag-audit-empty" class="muted" hidden>No entries yet.</p>
+            <div class="table-scroll">
+            <table class="wl-table">
+              <thead>
+                <!-- NOTE: No "who" column: an audit `Event` is `{ seq, tag, atNs, detail }`
+                     and carries no principal. The actor is named inside `detail` where the
+                     writer put it, so a column would be empty on every row. -->
+                <tr>
+                  <th scope="col">Seq</th>
+                  <th scope="col">When</th>
+                  <th scope="col">What</th>
+                  <th scope="col">Detail</th>
+                </tr>
+              </thead>
+              <tbody id="diag-audit-rows"></tbody>
+            </table>
+            </div>
+            <button type="button" id="diag-audit-more" hidden>Load more</button>
+          </section>
+          </div>
+        </div>
+
+        <!-- ══ CONFIGURATION ══ what you change rarely, and this browser's identity. -->
+        <div id="apanel-config" class="admin-panel" hidden>
+          <!-- Configuration. NOTE: the console had no config surface at all before this:
+               nine setters existed and it showed the current value of none of them, nor
+               what any of them did. Reading the source was the only route to "what mode
+               is this gateway in".
+
+               Each row is value + meaning + what changing it does + the bound the
+               canister enforces, and every field is documented in a table keyed on the
+               config record's own field names, so a new field cannot ship unexplained.
+               The command to change it is rendered beneath, pre-filled with the CURRENT
+               values, because the failure mode in these calls is transcription. -->
+          <section id="admin-config">
+            <h3 class="section-h">Configuration</h3>
+            <p class="muted">
+              What this gateway is set to, what each value does, and the command that
+              changes it. Edit the value in the command before running it.
+            </p>
+            <div id="config-groups"></div>
+          </section>
+
+          <!-- The operator ACTIONS that take no row: each is one command, rendered
+               whole, with what it cannot undo beside it. The row-scoped ones
+               (abandon, record_delivered, resolve_problem, resolve_orphan) attach to
+               their worklist rows instead, where the arguments come from. -->
+          <section id="admin-actions">
+            <h3 class="section-h">Actions</h3>
+            <p class="muted">
+              Commands that take no argument from a row. Read what each one cannot undo
+              before running it.
+            </p>
+            <div id="action-list"></div>
+          </section>
+
+          <section id="admin-identity">
+            <h3 class="section-h">This browser identity</h3>
+            <!-- Copyable because the sentence below literally says to send it to a
+                 controller, and because `add_admin` takes it as an argument. Inline for
+                 the same reason as the buyer's: `admin-link-command` below is the
+                 command block on this panel, and two competing blocks read as two
+                 instructions. -->
+            <p class="mono">
+              <code id="admin-principal"></code>
+              <button type="button" class="copy copy-inline" data-copy="admin-principal"
+                      aria-label="Copy this browser identity's principal">Copy</button>
+            </p>
+            <p id="admin-grant-state"></p>
+            <div id="admin-link" hidden>
+              <p class="muted">
+                To run operator commands as this identity, link it to the CLI and use that
+                identity for the calls.
+              </p>
+              <pre id="admin-link-command" class="mono"></pre>
+              <p class="muted" id="admin-link-note"></p>
+            </div>
+          </section>
+        </div>
+      </section>
+
     </main>
 
-    <footer>
+    <footer class="site-footer">
       <p class="muted">
-        Everything this gateway does — pricing, minting, delivery — runs in a
-        verifiable canister. No accounts, no custodians.
+        Pricing, payment, and delivery all run in one audited canister.
+        <span class="dot">·</span>
+        Operated by the DFINITY Foundation.
       </p>
+      <!-- TODO: imprint, terms, privacy, status, and contact are required
+           for a Foundation-operated property. Deliberately not stubbed with
+           placeholder links: a dead "Terms" link on a page taking card details
+           is worse than a visibly absent one. -->
     </footer>
 
     <script type="module" src="/src/main.ts"></script>

@@ -1,16 +1,31 @@
-/// Hand-rolled HTTP ingress (§6.0) — deliberately NOT mo:server, which drags
-/// in deprecated mo:base plus asset/caching/certification machinery this
-/// canister doesn't need (assets live on a separate canister; this one only
-/// takes POSTs whose query responses the gateway discards on upgrade).
+/// Hand-rolled HTTP ingress (§6.0).
+///
+/// ⚠️ **Not a rejected dependency — there is nothing to depend on.** Checked against the
+/// pinned packages rather than assumed: `mo:core` contains no HTTP at all, and `mo:ic`'s
+/// HTTP types are **outbound only** (`HttpRequestArgs` with `max_response_bytes`,
+/// `transform`, `is_replicated` — the management canister's outcall interface, which
+/// `rails/Session.mo` does use). Neither models the INBOUND gateway shape: `method`,
+/// `url`, `headers`, `body` in; `status_code` and `upgrade` out. Those types have to be
+/// declared here whichever way this goes.
+///
+/// So what is actually hand-rolled is the dispatch — about forty lines: a route table, a
+/// per-route `upgrade` flag, a body-size guard, and two header helpers. The alternative
+/// is a framework (`mo:server`), whose asset, caching and certification machinery this
+/// canister does not use: assets live on a separate canister, and every response here is
+/// either discarded pre-upgrade or an error, so nothing is certified. ⚠️ That comparison
+/// is a judgement about a package this repo does not install and nothing here verifies —
+/// the checkable half is the paragraph above.
 ///
 /// Requests arrive as the *anonymous* principal (§6.0): routes here are
 /// authenticated by payload only, never by caller. Dispatch is off a route
 /// *table* with a per-route `upgrade` flag (binding seam §11.1.2) — "exactly
 /// one route" is policy, not architecture; a future rail adds rows.
-import Array "mo:core/Array";
 import Blob "mo:core/Blob";
 import Char "mo:core/Char";
 import List "mo:core/List";
+// `Nat32` for the receiver `.toChar()` in `asciiLower`: the conversion is spelled on
+// the source value, and the import is what lets the method resolve.
+import Nat32 "mo:core/Nat32";
 import Text "mo:core/Text";
 
 module {
@@ -71,7 +86,7 @@ module {
   /// ASCII-only lowercase. Header names are ASCII tokens, so this is enough
   /// — and it avoids Unicode case-folding surprises.
   func asciiLower(text : Text) : Text {
-    text.map(func c = if (c >= 'A' and c <= 'Z') Char.fromNat32(c.toNat32() + 32) else c);
+    text.map(func c = if (c >= 'A' and c <= 'Z') (c.toNat32() + 32).toChar() else c);
   };
 
   public func response(statusCode : Nat16, headers : [HeaderField], body : Blob) : Response {
@@ -108,7 +123,7 @@ module {
             return text(413, "payload too large");
           };
           if (isQuery and route.upgrade) {
-            return { status_code = 200; headers = []; body = Blob.fromArray([]); upgrade = ?true };
+            return { status_code = 200; headers = []; body = Blob.empty(); upgrade = ?true };
           };
           return route.handler(req);
         };

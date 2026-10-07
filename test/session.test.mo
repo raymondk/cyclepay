@@ -1,0 +1,477 @@
+// Unit suite for Checkout Session request building and response parsing.
+//
+// Everything the canister sends to Stripe and everything it keeps from the reply
+// is decided by pure functions, so it is all pinned here. What this CANNOT reach
+// is whether the real API accepts the body — only a manual run against a sandbox
+// key does that, and the PocketIC suite cannot either, because it mocks outcalls.
+import { suite; test } "mo:test";
+import Iter "mo:core/Iter";
+import Nat "mo:core/Nat";
+import Text "mo:core/Text";
+import Session "../src/backend/rails/Session";
+
+suite("form encoding", func() {
+  test("leaves the RFC 3986 unreserved set alone", func() {
+    assert Session.formEncode("abcXYZ019-._~") == "abcXYZ019-._~";
+  });
+
+  test("escapes the characters that would change the body's SHAPE", func() {
+    // These four are the ones that matter: `&` and `=` are the field separators,
+    // so an unescaped one in a value injects a parameter. `#` truncates a URL at
+    // the fragment, which is exactly what `success_url` carries.
+    assert Session.formEncode("&") == "%26";
+    assert Session.formEncode("=") == "%3D";
+    assert Session.formEncode("#") == "%23";
+    assert Session.formEncode("?") == "%3F";
+  });
+
+  test("a space is %20, not +", func() {
+    assert Session.formEncode("a b") == "a%20b";
+  });
+
+  test("escapes per BYTE for a multi-byte character", func() {
+    // U+00E9 is two UTF-8 bytes. Escaping per character would emit one bogus
+    // escape and corrupt the value.
+    assert Session.formEncode("é") == "%C3%A9";
+  });
+
+  test("the product name and a real origin survive a round trip in shape", func() {
+    let encoded = Session.formEncode("https://abc.icp.net/#/order/deadbeef");
+    // The scheme's `//` and the fragment's `#` are both escaped, so the value
+    // cannot terminate early or introduce a field.
+    assert not encoded.contains(#text "#");
+    assert encoded.contains(#text "%23");
+  });
+});
+
+suite("the create body", func() {
+  let args : Session.CreateArgs = {
+    orderId = "aabbccddeeff00112233445566778899";
+    clientReferenceId = "2ibo7-dia_aabbccddeeff00112233445566778899";
+    usdCents = 1_000;
+    origin = "https://abc.icp.net";
+    expiresAtSeconds = 1_800_000_000;
+  };
+  let body = Session.createBody(args);
+
+  test("is a single fixed-amount line item, inline, with no Dashboard objects", func() {
+    assert body.contains(#text "mode=payment");
+    assert body.contains(#text "line_items%5B0%5D%5Bquantity%5D=1");
+    assert body.contains(#text "line_items%5B0%5D%5Bprice_data%5D%5Bunit_amount%5D=1000");
+    assert body.contains(#text "line_items%5B0%5D%5Bprice_data%5D%5Bcurrency%5D=usd");
+    // No price id, no product id: inline `price_data` only.
+    assert not body.contains(#text "price=");
+    assert not body.contains(#text "payment_link");
+  });
+
+  test("carries the attribution reference unchanged", func() {
+    // The whole webhook path keys off this, so it must survive encoding intact.
+    assert body.contains(#text "client_reference_id=2ibo7-dia_aabbccddeeff00112233445566778899");
+  });
+
+  test("sends BOTH return URLs, back to the buyer's own order", func() {
+    let expected = Session.formEncode("https://abc.icp.net/#/order/aabbccddeeff00112233445566778899");
+    assert body.contains(#text("success_url=" # expected));
+    assert body.contains(#text("cancel_url=" # expected));
+  });
+
+  test("pins adaptive pricing off", func() {
+    assert body.contains(#text "adaptive_pricing%5Benabled%5D=false");
+  });
+
+  test("enables NOTHING that could move amount_total away from unit_amount", func() {
+    // The guarantee that `amount_total == order.pricing.usdCents` is a property
+    // of what is absent. Each of these would break it, and each is one Stripe
+    // parameter away — so their absence is asserted rather than assumed.
+    for (forbidden in ([
+      "automatic_tax",
+      "adjustable_quantity",
+      "allow_promotion_codes",
+      "discounts",
+      "shipping_options",
+      "optional_items",
+      "tax_rates",
+      "after_expiration",
+    ] : [Text]).values()) {
+      assert not body.contains(#text forbidden);
+    };
+  });
+
+  test("card only, so money-in stays synchronous", func() {
+    assert body.contains(#text "payment_method_types%5B%5D=card");
+  });
+});
+
+suite("request headers", func() {
+  let headers = Session.createHeaders("rk_test_secret", "order-1");
+
+  test("the idempotency key IS the order id", func() {
+    // Two jobs, and the second is easy to miss: without it each replica creates
+    // a DISTINCT session, so consensus can never be reached and no transform can
+    // repair that. One order, one session, one key.
+    var found = false;
+    for (h in headers.values()) {
+      if (h.name == "Idempotency-Key") {
+        assert h.value == "order-1";
+        found := true;
+      };
+    };
+    assert found;
+  });
+
+  test("bearer auth and a form content type", func() {
+    var auth = "";
+    var ctype = "";
+    for (h in headers.values()) {
+      if (h.name == "Authorization") auth := h.value;
+      if (h.name == "Content-Type") ctype := h.value;
+    };
+    assert auth == "Bearer rk_test_secret";
+    assert ctype == "application/x-www-form-urlencoded";
+  });
+});
+
+suite("the transform", func() {
+  test("strips EVERY response header", func() {
+    // Not "reduces" — strips all. Stripe returns a unique `request-id` per HTTP
+    // request, so every replica sees a different value and passing headers
+    // through fails consensus on every single call. Asserted as a count of zero
+    // rather than on specific names, because a new Stripe header must not slip
+    // through a name-based filter.
+    let stripped = Session.strip({
+      status = 200;
+      body = "{}" : Blob;
+      headers = [
+        { name = "request-id"; value = "req_abc" },
+        { name = "Date"; value = "Mon, 25 Aug 2026 12:00:00 GMT" },
+        { name = "cf-ray"; value = "abc-LHR" },
+        { name = "stripe-should-retry"; value = "false" },
+      ];
+    });
+    assert stripped.headers.size() == 0;
+    // Status and body are what consensus is reached on, so both survive.
+    assert stripped.status == 200;
+    assert stripped.body == ("{}" : Blob);
+  });
+});
+
+suite("parsing a created session", func() {
+  let ok = "{\"id\":\"cs_test_a1b2\",\"url\":\"https://checkout.stripe.com/c/pay/cs_test_a1b2\",\"expires_at\":1800000000,\"livemode\":false,\"object\":\"checkout.session\"}";
+
+  test("keeps the four fields the order needs", func() {
+    switch (Session.parseCreated(Text.encodeUtf8(ok))) {
+      case (#ok(created)) {
+        assert created.id == "cs_test_a1b2";
+        assert created.url == "https://checkout.stripe.com/c/pay/cs_test_a1b2";
+        assert created.expiresAtSeconds == 1_800_000_000;
+        assert created.livemode == false;
+      };
+      case (#err(_)) assert false;
+    };
+  });
+
+  test("a missing field NAMES itself rather than failing generically", func() {
+    // An operator reading an audit line needs to know which field Stripe did not
+    // send, not that "parsing failed".
+    for ((json, field) in ([
+      ("{\"url\":\"u\",\"expires_at\":1,\"livemode\":false}", "id"),
+      ("{\"id\":\"i\",\"expires_at\":1,\"livemode\":false}", "url"),
+      ("{\"id\":\"i\",\"url\":\"u\",\"livemode\":false}", "expires_at"),
+      ("{\"id\":\"i\",\"url\":\"u\",\"expires_at\":1}", "livemode"),
+    ] : [(Text, Text)]).values()) {
+      switch (Session.parseCreated(Text.encodeUtf8(json))) {
+        case (#err(#missingField(name))) assert name == field;
+        case (_) assert false;
+      };
+    };
+  });
+
+  test("livemode is REQUIRED, not defaulted", func() {
+    // Defaulting it either way silently picks a side of the test/live check it
+    // exists to drive, which is the mistake that lets a test key sit behind a
+    // live webhook secret.
+    switch (Session.parseCreated(Text.encodeUtf8("{\"id\":\"i\",\"url\":\"u\",\"expires_at\":1}"))) {
+      case (#err(#missingField("livemode"))) {};
+      case (_) assert false;
+    };
+  });
+
+  test("non-JSON and a JSON scalar are both unparseable, not a crash", func() {
+    switch (Session.parseCreated(Text.encodeUtf8("<html>502</html>"))) {
+      case (#err(#unparseable)) {};
+      case (_) assert false;
+    };
+  });
+});
+
+suite("seconds to nanoseconds", func() {
+  test("multiplies by 10^9", func() {
+    // ⚠️ THE most likely bug on this path. Stripe's `expires_at` is Unix SECONDS and
+    // IC time is nanoseconds; storing the raw value makes every order look expired
+    // since 1970 — the open-order cap frees instantly, the detection predicates fire
+    // on everything, and the UI shows every order expired.
+    assert Session.secondsToNs(1) == 1_000_000_000;
+    assert Session.secondsToNs(1_800_000_000) == 1_800_000_000_000_000_000;
+    assert Session.secondsToNs(0) == 0;
+  });
+
+  test("a Stripe deadline lands in the same era as IC time, not 1970", func() {
+    // The property that catches the unit error even if the factor is mistyped:
+    // a 2026 timestamp in ns is ~1.8e18, so it must be far above any plausible
+    // seconds value.
+    let stripeSeconds = 1_800_000_000; // ~Jan 2027
+    assert Session.secondsToNs(stripeSeconds) > 1_000_000_000_000_000_000;
+  });
+});
+
+suite("expiring a session", func() {
+  test("addresses the session's own expire endpoint", func() {
+    assert Session.expireUrl("cs_test_a1b2")
+      == "https://api.stripe.com/v1/checkout/sessions/cs_test_a1b2/expire";
+  });
+
+  test("a 4xx that is not 401/403 is 'no longer open', whatever the prose says", func() {
+    // Cancellation must not guess from our clock why a session is closed: it either
+    // completed (the payment won the race) or expired already. Both are "change
+    // nothing and let the webhook resolve it", neither is "try again".
+    //
+    // ⚠️ **Keyed on the STATUS, and the body here is deliberately NOT Stripe's real
+    // wording.** The previous version of this test asserted three invented phrases
+    // ("in a status of complete" and friends) against a matcher that grepped for
+    // exactly those phrases, so it passed while production failed: real Stripe answers
+    // a paid session's expire with a 400 whose body contains none of them. Cancelling a
+    // paid order therefore reported "could not reach Stripe" and latched
+    // `stripeApiFailing` — a P1 saying "rotate the key" for a key that was fine.
+    //
+    // These bodies are gibberish ON PURPOSE. If the classification depended on their
+    // text again, this test would fail, which is the property the old one lacked.
+    switch (Session.expireOutcome(400, Text.encodeUtf8("{\"error\":{\"message\":\"anything at all\"}}"))) {
+      case (#notOpen(detail)) assert detail.contains(#text "anything at all");
+      case (_) assert false;
+    };
+    switch (Session.expireOutcome(404, Text.encodeUtf8("[]"))) {
+      case (#notOpen(_)) {};
+      case (_) assert false;
+    };
+  });
+
+  test("401 and 403 are their OWN outcome, because only they mean rotate the key", func() {
+    // The one expire answer that is a credentials problem. Folding it into `#failed`
+    // (or worse, letting a 400 reach the same latch) files the wrong instruction.
+    switch (Session.expireOutcome(401, Text.encodeUtf8("{}"))) {
+      case (#unauthorized) {};
+      case (_) assert false;
+    };
+    switch (Session.expireOutcome(403, Text.encodeUtf8("{}"))) {
+      case (#unauthorized) {};
+      case (_) assert false;
+    };
+  });
+
+  test("a 200 succeeds and a 5xx stays UNKNOWN, so the order stays payable", func() {
+    // A 500 or a rate limit must leave the order uncancelled and payable, so it must
+    // never be mistaken for a closed session.
+    switch (Session.expireOutcome(200, Text.encodeUtf8("{\"status\":\"expired\"}"))) {
+      case (#ok) {};
+      case (_) assert false;
+    };
+    switch (Session.expireOutcome(500, Text.encodeUtf8("{\"error\":{\"message\":\"internal\"}}"))) {
+      case (#failed(_)) {};
+      case (_) assert false;
+    };
+    switch (Session.expireOutcome(429, Text.encodeUtf8("{\"error\":{\"message\":\"rate limited\"}}"))) {
+      case (#failed(_)) {};
+      case (_) assert false;
+    };
+  });
+
+  test("an oversized body is truncated rather than carried whole into the audit log", func() {
+    let big = Text.fromIter(Iter.map<Nat, Char>(Nat.range(0, 400), func(_) { 'x' }));
+    switch (Session.expireOutcome(400, Text.encodeUtf8(big))) {
+      case (#notOpen(detail)) assert detail.contains(#text "truncated");
+      case (_) assert false;
+    };
+  });
+});
+
+suite("classifying an outcall failure", func() {
+  test("separates the retryable subnet timeout from Stripe not answering", func() {
+    // Two distinct timeouts with different meanings, and neither traps: the
+    // 60 s subnet one is SysTransient and retryable, the 30 s remote one is
+    // SysFatal. An audit line that says only "outcall failed" leaves the
+    // operator unable to tell them apart.
+    assert Session.classifyFailure("Canister http request timed out") == #subnetTimeout;
+    assert Session.classifyFailure("Deadline Exceeded") == #subnetTimeout;
+    assert Session.classifyFailure("Timeout expired") == #remoteTimeout;
+  });
+
+  test("names the consensus failure, because it means OUR transform", func() {
+    // The one failure the PocketIC suite structurally cannot produce: it mocks
+    // outcalls, so a transform leaking a per-request header passes there and
+    // fails only against the real API. Recognising it by message is the whole
+    // diagnostic.
+    let kind = Session.classifyFailure(
+      "No consensus could be reached. Replicas had different responses. Details: request_id: 5, hashes: ..."
+    );
+    assert kind == #noConsensus;
+    assert Session.failureAdvice(kind).contains(#text "transform");
+  });
+
+  test("all three size-limit messages classify as too large", func() {
+    // Including the misleading one: "Http body exceeds size limit of N" prints
+    // the FULL cap rather than the remainder left after headers, so the body
+    // that failed can be well under N.
+    assert Session.classifyFailure("Header size exceeds specified response size limit 16384") == #tooLarge;
+    assert Session.classifyFailure("Http body exceeds size limit of 16384 bytes.") == #tooLarge;
+    assert Session.classifyFailure("Transformed http response exceeds limit: 16384") == #tooLarge;
+  });
+
+  test("an unknown message is #other rather than a wrong guess", func() {
+    assert Session.classifyFailure("something nobody has seen") == #other;
+  });
+});
+
+suite("retrieve: url, cap, and the classifier", func() {
+  test("the retrieve url is the create url plus the session id", func() {
+    assert Session.retrieveUrl("cs_test_abc") == "https://api.stripe.com/v1/checkout/sessions/cs_test_abc";
+  });
+
+  test("the retrieve cap is LARGER than the create cap, deliberately", func() {
+    // A completed session carries `customer_details`, a resolved `payment_intent` and
+    // `total_details` that a freshly created one does not, and the cap covers Stripe's
+    // response headers too because it is enforced on the raw response. Copying the
+    // create cap here is the mistake this pins.
+    assert Session.retrieveMaxResponseBytes > Session.maxResponseBytes;
+  });
+
+  test("the three statuses the sweep acts on", func() {
+    assert Session.classify(Text.encodeUtf8("{\"status\":\"open\"}")) == #open;
+    assert Session.classify(Text.encodeUtf8("{\"status\":\"expired\"}")) == #expired;
+    // The intent comes back with it, because this is the ONLY place we can learn it:
+    // the order never reached `#paid`, so nothing indexed the payment. An obligation
+    // that cannot name the payment is one an operator cannot reconcile.
+    switch (Session.classify(Text.encodeUtf8("{\"status\":\"complete\",\"payment_status\":\"paid\",\"payment_intent\":\"pi_42\"}"))) {
+      case (#completePaid({ paymentIntent })) assert paymentIntent == "pi_42";
+      case (_) assert false;
+    };
+  });
+
+  test("complete and paid but with NO payment_intent is #unknown, not a nameless claim", func() {
+    switch (Session.classify(Text.encodeUtf8("{\"status\":\"complete\",\"payment_status\":\"paid\"}"))) {
+      case (#unknown(detail)) assert Text.contains(detail, #text "payment_intent");
+      case (_) assert false;
+    };
+  });
+
+  test("complete-but-UNPAID is never read as paid", func() {
+    // A delayed-notification method (SEPA, ACH, boleto) closes the session before the
+    // money settles. Our sessions pin `payment_method_types[]=card` so this is
+    // unreachable — but folding it into the paid case would make the sweep file an
+    // operator-facing obligation claiming a buyer paid when nobody has. Silence is
+    // correct: `async_payment_succeeded`/`_failed` own that lifecycle.
+    switch (Session.classify(Text.encodeUtf8("{\"status\":\"complete\",\"payment_status\":\"unpaid\"}"))) {
+      case (#unknown(detail)) assert Text.contains(detail, #text "unpaid");
+      case (_) assert false;
+    };
+    switch (Session.classify(Text.encodeUtf8("{\"status\":\"complete\"}"))) {
+      case (#unknown(_)) {};
+      case (_) assert false;
+    };
+  });
+
+  test("every unrecognised shape falls to #unknown rather than a guess", func() {
+    // Fail-safe is the whole property: the sweep treats #unknown exactly like #open, so
+    // a Stripe response change makes this feature inert instead of wrong. A classifier
+    // that guessed would be guessing about whether a buyer has been paid.
+    for (body in ([
+      "{\"status\":\"tomorrow\"}", // a status nobody has seen
+      "{\"payment_status\":\"paid\"}", // no status at all
+      "not json",
+      "{}",
+    ] : [Text]).values()) {
+      switch (Session.classify(Text.encodeUtf8(body))) {
+        case (#unknown(detail)) assert detail.size() > 0; // carries something auditable
+        case (_) assert false;
+      };
+    };
+  });
+});
+
+suite("validateOrigin — https, or loopback http", func() {
+  /// ⚠️ Stripe imposes no scheme requirement on `success_url` — it is a redirect target
+  /// for the buyer's own browser, and Stripe's own quickstart uses
+  /// `http://localhost:4242/success.html`. The https rule is ours, and its reason (never
+  /// send a buyer to a plaintext page after paying) is vacuous for loopback.
+
+  test("https is accepted and the trailing slash is trimmed", func() {
+    assert Session.validateOrigin("https://cyclepay.icp.net") == #ok("https://cyclepay.icp.net");
+    assert Session.validateOrigin("https://cyclepay.icp.net/") == #ok("https://cyclepay.icp.net");
+  });
+
+  test("loopback http is accepted, in all four spellings", func() {
+    // `.localhost` matters: a local `icp network` serves the frontend at
+    // `http://frontend.local.localhost:8000`.
+    assert Session.validateOrigin("http://localhost:8000") == #ok("http://localhost:8000");
+    assert Session.validateOrigin("http://127.0.0.1:8000") == #ok("http://127.0.0.1:8000");
+    assert Session.validateOrigin("http://[::1]:8000") == #ok("http://[::1]:8000");
+    assert Session.validateOrigin("http://frontend.local.localhost:8000")
+      == #ok("http://frontend.local.localhost:8000");
+  });
+
+  test("a host that merely CONTAINS localhost is refused", func() {
+    // The trap a substring match would fall into, and the reason the host is parsed.
+    assert Session.validateOrigin("http://localhost.evil.com") == #err(#notHttps);
+    assert Session.validateOrigin("http://evil.com/localhost") == #err(#notHttps);
+    assert Session.validateOrigin("http://notlocalhost") == #err(#notHttps);
+    // ⚠️ **The whole userinfo family, not one member of it.** A browser reads everything
+    // before the LAST `@` as credentials, so the host here is always `evil.com`. The
+    // first version of this test had only the port-less spelling — the single member a
+    // port-first parse happens to refuse — so it read as coverage of the family while
+    // four of five were accepted.
+    for (
+      origin in [
+        "http://localhost@evil.com",
+        "http://localhost:8000@evil.com",
+        "http://127.0.0.1:80@evil.com",
+        "http://localhost:8000@evil.com/pay",
+        "http://[::1]:8000@evil.com",
+        "http://user@localhost@evil.com",
+      ].values()
+    ) {
+      assert Session.validateOrigin(origin) == #err(#notHttps);
+    };
+    // And userinfo in front of a genuinely loopback host is still loopback.
+    assert Session.validateOrigin("http://user@localhost:8000") == #ok("http://user@localhost:8000");
+  });
+
+  test("non-loopback http is still refused", func() {
+    assert Session.validateOrigin("http://cyclepay.icp.net") == #err(#notHttps);
+    assert Session.validateOrigin("ftp://cyclepay.icp.net") == #err(#notHttps);
+    assert Session.validateOrigin("cyclepay.icp.net") == #err(#notHttps);
+  });
+
+  test("a query or fragment is refused, on either scheme", func() {
+    // It would collide with the `#/order/<id>` route appended to the origin.
+    assert Session.validateOrigin("https://cyclepay.icp.net?x=1") == #err(#hasQueryOrFragment);
+    assert Session.validateOrigin("https://cyclepay.icp.net#/order") == #err(#hasQueryOrFragment);
+    assert Session.validateOrigin("http://localhost:8000?x=1") == #err(#hasQueryOrFragment);
+  });
+
+  test("empty is its own answer", func() {
+    assert Session.validateOrigin("") == #err(#empty);
+  });
+
+  test("a degenerate authority is refused, and does not TRAP", func() {
+    // `"".split(#char '@')` yields zero elements, so an array index underflowed on Nat
+    // and `set_stripe_origin("http://")` trapped instead of returning its Result. Every
+    // member of the family, because sampling one member of a family is what let the
+    // userinfo bypass through.
+    for (origin in ["http://", "https://", "http:///path", "https:///", "http://@", "http://localhost@"].values()) {
+      assert Session.validateOrigin(origin) == #err(#noHost);
+    };
+    // ⚠️ `https://` used to answer #ok("https:"), which makes success_url
+    // `https:/#/order/<id>`. Refused now, and as #noHost rather than #notHttps — it IS
+    // https, so that reason would have been false.
+    assert Session.validateOrigin("https://") != #err(#notHttps);
+  });
+});

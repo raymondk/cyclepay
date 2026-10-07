@@ -1,10 +1,10 @@
 /// Per-rail dedup sets with retention/pruning (§4.2).
 ///
-/// Dedup gates the mint (§4.1 invariant): a key that fails `record*` here is
-/// the *same* payment seen again (Stripe at-least-once redelivery, ck-USDC
-/// block replay) and must be silently acked — never minted, never queued.
+/// Dedup gates delivery (§4.1 invariant): a key that fails `record*` here is
+/// the *same* payment seen again (Stripe at-least-once redelivery,
+/// block replay) and must be silently acked — never delivered, never queued.
 /// A genuine second payment carries a fresh `event.id`/`payment_intent`,
-/// passes dedup, and is the rail's business to queue as Type 1.
+/// passes dedup, and is the rail's business to queue as a refundable obligation.
 ///
 /// Retention (§4.2): Stripe keys are timestamped at first sight and pruned
 /// after ~7 days (Stripe redelivers ≤3 days); crypto `block_index` dedup is
@@ -24,18 +24,15 @@ module {
   public type Store = {
     /// Stripe `event.id` → first-seen ns. Catches event redelivery.
     stripeEvents : Map.Map<Text, Int>;
-    /// Stripe `payment_intent` → first-seen ns. One mint per payment, even
+    /// Stripe `payment_intent` → first-seen ns. One delivery per payment, even
     /// across distinct event deliveries for the same intent.
     stripeIntents : Map.Map<Text, Int>;
-    /// ck-USDC ledger block indexes already credited (§4.2). Never pruned.
-    ckUsdcBlocks : Set.Set<Nat>;
   };
 
   public func emptyStore() : Store {
     {
-      stripeEvents = Map.empty<Text, Int>();
-      stripeIntents = Map.empty<Text, Int>();
-      ckUsdcBlocks = Set.empty<Nat>();
+      stripeEvents = Map.empty();
+      stripeIntents = Map.empty();
     };
   };
 
@@ -47,13 +44,6 @@ module {
   /// True = first sight, recorded; false = duplicate (ack and drop).
   public func recordStripeIntent(store : Store, paymentIntent : Text, nowNs : Int) : Bool {
     recordTimestamped(store.stripeIntents, paymentIntent, nowNs);
-  };
-
-  /// True = first sight, recorded; false = block already credited.
-  public func recordCkUsdcBlock(store : Store, blockIndex : Nat) : Bool {
-    if (store.ckUsdcBlocks.contains(blockIndex)) return false;
-    store.ckUsdcBlocks.add(blockIndex);
-    true;
   };
 
   /// Drop Stripe keys first seen ≥ `stripeRetentionNs` ago. Returns the count

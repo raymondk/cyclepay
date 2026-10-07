@@ -1,234 +1,126 @@
-/// TypeScript mirrors of the backend's candid interface (and the ledger/CMC
-/// subsets the suite drives directly). Candid → TS conventions: `opt T` is
-/// `[] | [T]`, variants are single-key objects, `nat`/`int` are bigint.
-import type { Principal } from '@icp-sdk/core/principal';
+/// Types for the PocketIC suite.
+///
+/// ⚠️ **Everything canister-shaped is PROJECTED off the generated service, never
+/// restated.** Hand-written mirrors of the Motoko types drift silently: a `GateReason`
+/// copy keeps variants the backend deleted and misses ones it added, so those refusals
+/// are undecodable and therefore untestable.
+///
+/// ⚠️ **A mirror fails ASYMMETRICALLY, which is why no test caught it.** Declaring a
+/// field the canister lacks breaks the Candid decode and gets found. *Omitting* one
+/// decodes fine, and the suite silently covers less than it claims. Projections have no
+/// omission failure mode: there is only one definition.
+///
+/// The rule for adding to this file: if a type describes the **canister**, project it. If
+/// it describes the **test rig** — a helper, another canister's interface we do not own —
+/// write it, in the marked section below.
+import type { _SERVICE } from './generated/declarations/backend.did.js';
+
+/// Unwrap Candid's tuple-`opt` (`[] | [T]`) to `T`.
+///
+/// ⚠️ The raw declarations use the tuple form, not the actor wrapper's `T | null` — which
+/// is why the suite consumes `declarations/` and is generated `--actor-disabled`. The
+/// scenarios were already written against tuples, so nothing in them changed shape.
+type Unopt<T> = T extends [infer U] ? U : never;
+
+/// The tags of a Candid variant, as a string union.
+///
+/// ⚠️ Distributive on purpose: a variant arrives as a union of single-key records, so a
+/// bare `keyof` would yield `never`.
+type Tags<T> = T extends object ? keyof T : never;
+
+// ── The canister, projected ─────────────────────────────────────────────────
+//
+// One definition each, taken from the method that carries it. A backend change to any of
+// these is a typecheck failure at the projection rather than a silent divergence.
+
+export type BackendService = _SERVICE;
+
+export type Order = Unopt<Awaited<ReturnType<_SERVICE['get_order']>>>;
+export type Amount = Parameters<_SERVICE['create_order']>[0];
+export type Destination = Parameters<_SERVICE['create_order']>[1];
+export type Account = Extract<Destination, { cyclesLedgerAccount: unknown }>['cyclesLedgerAccount'];
+export type Pricing = Order['pricing'];
+export type ExpiredBy = Unopt<Order['expiredBy']>;
+export type Rail = Order['rail'];
+export type Problem = Order['problems'][number];
+export type ProblemKind = Problem['kind'];
+export type OrderStatusKey = Tags<Order['status']>;
+
+export type CreateOrderResult = Awaited<ReturnType<_SERVICE['create_order']>>;
+export type CreatedOrder = Extract<CreateOrderResult, { ok: unknown }>['ok'];
+export type CreateOrderError = Extract<CreateOrderResult, { err: unknown }>['err'];
+
+/// Derived the same way, so the suite cannot hold a stale copy of the variant.
+export type CancelOrderResult = Awaited<ReturnType<_SERVICE['cancel_order']>>;
+export type CancelOrderError = Extract<CancelOrderResult, { err: unknown }>['err'];
+
+export type JournalEntry = Unopt<Awaited<ReturnType<_SERVICE['delivery_journal']>>>;
+export type TransferIntent = Unopt<JournalEntry['transferIntent']>;
+export type Receipt = Unopt<Awaited<ReturnType<_SERVICE['receipt']>>>;
+
+export type Tier = Awaited<ReturnType<_SERVICE['card_tiers']>>[number];
+export type QuotePreviews = Awaited<ReturnType<_SERVICE['quote_previews']>>;
+export type QuotePreview = QuotePreviews['quotes'][number];
+
+export type RefusalCounts = Awaited<ReturnType<_SERVICE['refusal_counts']>>['counts'];
+export type RailStateLatch = Awaited<ReturnType<_SERVICE['refusal_counts']>>['refusingNow'];
+
+export type GateConfig = Awaited<ReturnType<_SERVICE['lifecycle_config']>>['gate'];
+export type GateReason = Extract<
+  Awaited<ReturnType<_SERVICE['can_purchase']>>,
+  { err: unknown }
+>['err'];
+
+export type OrderFilter = Parameters<_SERVICE['admin_orders']>[0];
+export type OrdersPage = Awaited<ReturnType<_SERVICE['admin_orders']>>;
+
+export type DelayedPage = Awaited<ReturnType<_SERVICE['delayed_deliveries']>>;
+export type DelayedDelivery = DelayedPage['entries'][number];
+
+export type OrphanPage = Awaited<ReturnType<_SERVICE['orphans_unresolved']>>;
+export type OrphanEntry = OrphanPage['entries'][number];
+export type ErrorKind = OrphanEntry['kind'];
+
+export type AuditPage = Awaited<ReturnType<_SERVICE['audit_log']>>;
+export type AuditEvent = AuditPage['events'][number];
+
+export type PricingStatus = Awaited<ReturnType<_SERVICE['pricing_status']>>;
+export type PricingConfig = PricingStatus['config'];
+export type PricingRates = Unopt<PricingStatus['rates']>;
+export type PricingQuality = PricingRates['quality'];
+
+export type DeliveryConfig = Parameters<_SERVICE['set_delivery_config']>[0];
+export type DeliveryConfigError = Extract<
+  Awaited<ReturnType<_SERVICE['set_delivery_config']>>,
+  { err: unknown }
+>['err'];
+
+export type HttpRequest = Parameters<_SERVICE['http_request']>[0];
+export type HttpResponse = Awaited<ReturnType<_SERVICE['http_request']>>;
+
+export type DeliveryStats = Awaited<ReturnType<_SERVICE['delivery_stats']>>;
+
+// ── The test rig's own types ────────────────────────────────────────────────
+//
+// These describe the harness, or an interface we do not own. ⚠️ The ledger and CMC
+// services stay hand-written on purpose: their `.did` files are not ours, and the suite
+// calls a handful of methods on each. The backend talks to them through its own Motoko
+// bindings, so a drift here breaks the suite's own calls and nothing else.
 
 export type Opt<T> = [] | [T];
-export type Result<T, E> = { ok: T } | { err: E };
 export type Bytes = Uint8Array | number[];
 
-export interface Account {
-  owner: Principal;
-  subaccount: Opt<Bytes>;
-}
-
-export type Destination =
-  | { canister: Principal }
-  | { cyclesLedgerAccount: Account };
-
-export type OrderStatusKey =
-  | 'created' | 'expired' | 'paid' | 'minting' | 'icpAtCmc'
-  | 'delivered' | 'awaitingTreasury' | 'errorQueue';
-
+/// A status selector: deliberately WIDER than the canister's `OrderStatus`, which carries
+/// exactly one tag. The harness reads `Object.keys(status)[0]`, so it accepts any
+/// status-shaped holder — `Order`, a journal entry, a delayed delivery.
 export type StatusVariant = Partial<Record<OrderStatusKey, null>>;
 
-export interface Pricing {
-  usdCents: bigint;
-  xdrPerUsdMicros: bigint;
-  feeBps: bigint;
-  feeFixedCents: bigint;
-}
-
-export interface Order {
-  id: string;
-  owner: { ii: Principal };
-  rail: Partial<Record<'card' | 'ckUsdc', null>>;
-  destination: Destination;
-  lockedCycles: bigint;
-  pricing: Pricing;
-  status: StatusVariant;
-  createdAtNs: bigint;
-  updatedAtNs: bigint;
-}
-
-export interface CreatedOrder {
-  order: Order;
-  clientReferenceId: string;
-}
-
-export type CreateOrderError =
-  | { anonymous: null }
-  | { unknownTier: string }
-  | { tierBelowFees: string }
-  | { rateUnavailable: null }
-  | { idGeneration: null };
-
-export interface TransferIntent {
-  to: Account;
-  amountE8s: bigint;
-  memo: Bytes;
-  createdAtTimeNs: bigint;
-}
-
-export interface JournalEntry {
-  orderId: string;
-  status: StatusVariant;
-  destination: Destination;
-  transferIntent: Opt<TransferIntent>;
-  blockIndex: Opt<bigint>;
-  cyclesMinted: Opt<bigint>;
-  retries: bigint;
-  createdAtNs: bigint;
-  updatedAtNs: bigint;
-}
-
-export type ErrorKind =
-  | { duplicate: { orderId: string; paymentRef: string } }
-  | { unattributed: { claimedRef: string; paymentRef: string } }
-  | { undeliverable: { orderId: string; cycles: bigint } }
-  | { stuckMint: { orderId: string; stage: string } };
-
-export interface ErrorEntry {
-  id: bigint;
-  rail: Partial<Record<'card' | 'ckUsdc', null>>;
-  kind: ErrorKind;
-  detail: string;
-  createdAtNs: bigint;
-  resolvedAtNs: Opt<bigint>;
-}
-
-export interface AuditEvent {
-  seq: bigint;
-  atNs: bigint;
-  tag: string;
-  detail: string;
-}
-
-export interface Tier {
-  id: string;
-  usdCents: bigint;
-  paymentLinkUrl: string;
-}
-
-export interface ForexConfig {
-  url: string;
-  feeBps: bigint;
-  feeFixedCents: bigint;
-  maxAgeNs: bigint;
-}
-
-export interface TreasuryConfig {
-  burnCapE8s: bigint;
-  burnWindowNs: bigint;
-  lowFloatThresholdE8s: bigint;
-  maxHoldNs: bigint;
-}
-
-export interface TreasuryStatus {
-  config: TreasuryConfig;
-  burnedInWindowE8s: bigint;
-  lastObservedFloat: Opt<{ e8s: bigint; atNs: bigint }>;
-  lowFloat: boolean;
-  heldOrders: bigint;
-}
-
-export interface CkUsdcConfig {
-  minUsdCents: bigint;
-  maxUsdCents: bigint;
-  feeBps: bigint;
-  feeFixedCents: bigint;
-  ledgerFeeUnits: bigint;
-}
-
-export type CkUsdcConfigError =
-  | { feeBpsTooHigh: null }
-  | { minAboveMax: null };
-
-export interface CreatedCkUsdcOrder {
-  order: Order;
-  amountUnits: bigint;
-  approveUnits: bigint;
-}
-
-export type CreateCkUsdcOrderError =
-  | { anonymous: null }
-  | { railDisabled: null }
-  | { zeroAmount: null }
-  | { belowMinimum: bigint }
-  | { aboveMaximum: bigint }
-  | { amountBelowFees: null }
-  | { rateUnavailable: null }
-  | { idGeneration: null };
-
-export type ClaimCkUsdcError =
-  | { anonymous: null }
-  | { notFound: null }
-  | { wrongRail: null }
-  | { notClaimable: string }
-  | { inFlight: null }
-  | { insufficientAllowance: { allowance: bigint; required: bigint } }
-  | { insufficientFunds: { balance: bigint; required: bigint } }
-  | { badFee: { expectedFee: bigint } }
-  | { ledgerRejected: string }
-  | { retryable: string }
-  | { staleIntent: null };
-
-export interface PullIntent {
-  createdAtTimeNs: bigint;
-  amountUnits: bigint;
-  feeUnits: bigint;
-  fromOwner: Principal;
-  memo: Bytes;
-}
-
-export interface PullEntry {
-  orderId: string;
-  intent: PullIntent;
-  blockIndex: Opt<bigint>;
-  escalatedAtNs: Opt<bigint>;
-  createdAtNs: bigint;
-  updatedAtNs: bigint;
-}
-
-export interface HttpRequest {
-  method: string;
-  url: string;
-  headers: [string, string][];
-  body: Bytes;
-}
-
-export interface HttpResponse {
-  status_code: number;
-  headers: [string, string][];
-  body: Bytes;
-  upgrade: Opt<boolean>;
-}
-
-export interface BackendService {
-  audit_log(): Promise<AuditEvent[]>;
-  card_tiers(): Promise<Tier[]>;
-  ck_usdc_config(): Promise<CkUsdcConfig>;
-  ck_usdc_pull(id: string): Promise<Opt<PullEntry>>;
-  claim_ck_usdc_order(id: string): Promise<Result<Order, ClaimCkUsdcError>>;
-  create_ck_usdc_order(usdCents: bigint, destination: Destination): Promise<Result<CreatedCkUsdcOrder, CreateCkUsdcOrderError>>;
-  create_order(tierId: string, destination: Destination): Promise<Result<CreatedOrder, CreateOrderError>>;
-  error_queue(): Promise<ErrorEntry[]>;
-  forex_status(): Promise<{ rate: Opt<{ xdrPerUsdMicros: bigint; fetchedAtNs: bigint }>; config: ForexConfig }>;
-  get_order(id: string): Promise<Opt<Order>>;
-  health(): Promise<boolean>;
-  http_request(req: HttpRequest): Promise<HttpResponse>;
-  http_request_update(req: HttpRequest): Promise<HttpResponse>;
-  list_orders(): Promise<Order[]>;
-  mint_journal(id: string): Promise<Opt<JournalEntry>>;
-  process_order(id: string): Promise<Result<Order, { notFound: null } | { inFlight: null }>>;
-  recovery_status(): Promise<{ intervalNs: bigint; lastSweep: Opt<{ atNs: bigint; pending: bigint }>; sweepInFlight: boolean }>;
-  refresh_float(): Promise<bigint>;
-  reset_burn_window(): Promise<bigint>;
-  reset_ck_usdc_pull(id: string): Promise<boolean>;
-  resolve_error(id: bigint): Promise<Result<ErrorEntry, { notFound: bigint } | { alreadyResolved: bigint }>>;
-  set_card_tiers(tiers: Tier[]): Promise<Result<null, unknown>>;
-  set_ck_usdc_config(config: CkUsdcConfig): Promise<Result<null, CkUsdcConfigError>>;
-  set_forex_config(config: ForexConfig): Promise<Result<null, unknown>>;
-  set_recovery_interval(intervalNs: bigint): Promise<Result<null, unknown>>;
-  set_treasury_config(config: TreasuryConfig): Promise<Result<null, unknown>>;
-  set_webhook_secret(secret: string): Promise<Result<null, unknown>>;
-  treasury_status(): Promise<TreasuryStatus>;
-  webhook_secret_status(): Promise<{ isSet: boolean; setAtNs: Opt<bigint>; generation: bigint }>;
-  withdraw_ck_usdc(to: Account, amountUnits: bigint): Promise<Result<bigint, string>>;
-}
+export type Result<T, E> = { ok: T } | { err: E };
 
 export interface Icrc1Service {
   icrc1_balance_of(account: Account): Promise<bigint>;
+  /// The delivery fee, read from the ledger rather than disclosed by `quote_previews`.
+  icrc1_fee(): Promise<bigint>;
   icrc1_transfer(arg: {
     from_subaccount: Opt<Bytes>;
     to: Account;
@@ -237,23 +129,6 @@ export interface Icrc1Service {
     memo: Opt<Bytes>;
     created_at_time: Opt<bigint>;
   }): Promise<{ Ok: bigint } | { Err: unknown }>;
-}
-
-export interface Icrc2Service extends Icrc1Service {
-  icrc2_approve(arg: {
-    fee: Opt<bigint>;
-    memo: Opt<Bytes>;
-    from_subaccount: Opt<Bytes>;
-    created_at_time: Opt<bigint>;
-    amount: bigint;
-    expected_allowance: Opt<bigint>;
-    expires_at: Opt<bigint>;
-    spender: Account;
-  }): Promise<{ Ok: bigint } | { Err: unknown }>;
-  icrc2_allowance(arg: {
-    account: Account;
-    spender: Account;
-  }): Promise<{ allowance: bigint; expires_at: Opt<bigint> }>;
 }
 
 export interface CmcService {

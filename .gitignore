@@ -1,10 +1,17 @@
-# These can be reinstalled with npx skills
-.agents/skills
+# ICP skills — auto-synced by the SessionStart hook (.agents/sync-ic-skills.sh,
+# reached as .claude/sync-ic-skills.sh through the committed .claude -> .agents
+# symlink). The hook and script are committed; the skills they fetch are not.
+.agents/skills/
+# Local Claude Code settings (personal; the shared hook lives in .agents/settings.json)
+.agents/settings.local.json
 
 .mops
 .migrations-*/
 
-# build artifacts (commit .icp/data/ when it appears — it holds canister ID mappings)
+# ⚠️ **`.icp/cache/` ONLY — never broaden this to `.icp/`.** `.icp/data/` holds the
+# canister ID mappings and MUST be committed: it is the record of which canister id is
+# which environment, and for a deployed gateway that record is not reconstructible from
+# the repo. `.icp/cache/` is rebuildable build output (`icp deploy` refills it).
 .icp/cache/
 # reproducible-build output (scripts/reproducible-build.sh) — hashes are
 # published in release notes, binaries are rebuildable from the tag
@@ -15,13 +22,59 @@ release/
 src/backend/dist/*
 !src/backend/dist/backend.did
 
+# a stray root-level node_modules appears if anyone runs npx/vitest from the
+# repo root instead of the workspace that owns the tooling
+/node_modules/
+
 # frontend (src/frontend)
 src/frontend/node_modules/
 src/frontend/dist/
+# the fixtures build the browser specs serve (npm run build:fixtures). A separate
+# outDir on purpose: `dist/` is what ships, and a bundle carrying the test hook
+# must never be reachable by a deploy.
+src/frontend/dist-fixtures/
 src/frontend/src/bindings/
+
+# the sealer (scripts/seal) — `package-lock.json` is the committed contract, the install
+# is not. ⚠️ This repo has already tracked a node_modules once (see test/browser below,
+# 193 files and 18 MB including a macOS-only binary in a Linux-CI repo), and the rules here
+# are per-directory rather than a global `node_modules/`, so a NEW npm package is ignored
+# by nothing until someone adds it. Staging this one first showed 1554 such files.
+scripts/seal/node_modules/
+
+# Your own Stripe SANDBOX Payment Links, read by scripts/local-dev-seed.sh so they
+# do not have to be exported into every new shell. Never committed: they are yours,
+# they are per-account, and a live-mode link in here would be a loaded gun.
+scripts/.local-dev.env
+
+# browser suite (test/browser). `package-lock.json` is the committed contract;
+# the install is not. 193 files and 18 MB of it were tracked for three days —
+# including `fsevents.node`, a macOS-only Mach-O binary, in a repo whose CI is
+# Linux — because the commit that added the suite committed its node_modules
+# alongside the specs. Nothing ever read it: CI runs `npm --prefix test/browser ci`,
+# which deletes and reinstalls the directory from the lockfile.
+test/browser/node_modules/
+# Playwright's per-run failure artifacts (traces, diff images). The screenshot
+# BASELINES beside them are committed on purpose — see test/browser/visual.spec.ts.
+test/browser/test-results/
+test/browser/playwright-report/
 
 # PocketIC integration suite (test/integration)
 test/integration/node_modules/
 # fetched by scripts/fetch-ledger-wasm.mjs, sha256-pinned there — the pin is
 # committed, the binary is not
 test/integration/wasm/
+
+# `state-hash` verifiers built by scripts/check-frontend-hash.py, one directory per
+# certified-assets release. Built from the pinned tag on first use and cached; never
+# committed (a compiled binary, and this repo has tracked build output before).
+.cache/
+
+# Python bytecode from the repo scripts (they are run directly, never imported
+# except by a one-off probe, which is how this got committed once).
+__pycache__/
+*.pyc
+
+# macOS Finder metadata. Committed once by the demo-playbook branch and caught
+# before it reached main — nothing reads it, and it changes on every Finder visit.
+.DS_Store

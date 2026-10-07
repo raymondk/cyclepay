@@ -1,125 +1,374 @@
 /// Core shared types for the cycles gateway.
 ///
-/// Decision record: design-docs/ONCHAIN_GATEWAY_SPEC.md — §2 (ownership),
-/// §3 (locked cycle quantity), §4 (state machine), §4.2 (data model),
-/// §5.1 (transfer intent), §11.1 (binding Base seams).
+/// Decision record: `docs/DESIGN.md` — §2 ownership, §3 the locked quantity,
+/// §4 the state machine, §4.2 this data model, §5.1 transfer intent,
+/// §11.1 the binding seams.
 import Principal "mo:core/Principal";
 
 module {
 
-  /// Seam §11.1.1 — single-case variant from day one. If Base/x402 returns,
-  /// `#evmAddress : Blob` is a migration-free, compatible extension; a bare
-  /// `Principal` field would force a stable-state migration plus an audit of
-  /// every authz site. Pattern-match at every authz check.
+  /// Seam §11.1.1 — a single-case variant from day one, and it must stay one.
+  /// Adding a case is a migration-free extension; widening to a bare `Principal`
+  /// forces a stable-state migration plus an audit of every authz site.
   public type Owner = { #ii : Principal };
 
-  /// Query authz is `caller == order.owner` (§2). Centralised pattern match;
-  /// new owner cases make this a compile error rather than a silent assumption.
+  /// Query authz is `caller == order.owner` (§2). Centralised so that adding an
+  /// `Owner` case cannot compile until every match on it is updated — ask
+  /// `mops check -- -Werror` for the list rather than maintaining one here.
+  ///
+  /// ⚠️ **That guarantee rests on `-Werror`, not on the language.** A non-exhaustive
+  /// match is M0145, a *warning*, so a plain `mops check` reports every one and still
+  /// succeeds — leaving each unhandled site to trap at runtime. On the webhook path
+  /// that trap is a 5xx Stripe retries for ~3 days.
+  ///
+  /// ⚠️ **What `-Werror` does NOT catch:** `Orders.openOrderCount` and
+  /// `Orders.ownerPage` look owners up through `principalsToOrders`, a
+  /// Principal-keyed index, and never pattern-match. A non-principal owner would
+  /// compile clean and silently return nothing for those. Fail-closed, but the seam
+  /// work has to **reindex**, not just re-match.
   public func isOwnedBy(owner : Owner, caller : Principal) : Bool {
     switch (owner) {
       case (#ii(p)) p == caller;
     };
   };
 
-  /// Money-in rails in scope (§6). Base/x402 deferred (§6.3, §11).
-  public type Rail = { #card; #ckUsdc };
+  /// Money-in rail (§1). Single-case variant for the same reason `Owner` is: it names
+  /// the dimension, so a second rail is additive rather than a schema-wide edit.
+  public type Rail = { #card };
 
   /// ICRC-1 account (cycles ledger destination).
   public type Account = { owner : Principal; subaccount : ?Blob };
 
-  /// Where minted cycles are forwarded (§5, mint-to-self-then-forward).
-  /// `#canister` deposits to a canister's cycle balance and can fail (deleted
-  /// target → error queue Type 2); `#cyclesLedgerAccount` essentially never
-  /// fails (§5, "no pre-validation" decision).
+  /// Where cycles are delivered (§5) — the buyer's **own** cycles-ledger account,
+  /// default subaccount. `create_order` refuses anything else, so a crafted call
+  /// cannot send cycles to a third party.
+  ///
+  /// ⚠️ **Depositing straight to a canister's cycle balance is not the case to add.**
+  /// It fails on a deleted or refusing target *after* the cycles have left — a
+  /// send-then-lose class this app does not have.
   public type Destination = {
-    #canister : Principal;
     #cyclesLedgerAccount : Account;
   };
 
-  /// Random, raw_rand-derived (hex text), not a monotonic counter (§2) — the
-  /// ID sits in the public `client_reference_id`. Not a bearer secret.
+  /// Whether a destination delivers to `caller` and nobody else.
+  ///
+  /// **`null` is the one accepted spelling of the default subaccount, and equivalent
+  /// forms are refused rather than normalised.** ICRC-1 makes an all-zero
+  /// 32-byte subaccount the *same account* as `null`, so this rejects a request
+  /// naming an account the caller does own. Deliberate: a destination is stored,
+  /// compared and rendered, and two stable values for one account is a defect source
+  /// — an audit line and a receipt disagreeing about the same account.
+  ///
+  /// So `#destinationNotOwned` is imprecise for exactly that input. Accepted
+  /// because nothing but this app calls it; if a third-party integrator ever does,
+  /// canonicalise at the edge rather than widening this predicate.
+  ///
+  /// A genuinely different subaccount is refused for the plain reason: it is not the
+  /// balance the app shows or that `icp cycles balance` reads by default, so
+  /// delivering there strands the buyer's cycles somewhere they will not look.
+  public func isOwnDestination(destination : Destination, caller : Principal) : Bool {
+    switch (destination) {
+      case (#cyclesLedgerAccount(account)) account.owner == caller and account.subaccount == null;
+    };
+  };
+
+  /// Random, `raw_rand`-derived hex, not a monotonic counter (§2) — the id sits in the
+  /// public `client_reference_id`. Not a bearer secret.
   public type OrderId = Text;
 
-  /// §4 — one Order, one state machine. Transitions live in Orders.mo;
-  /// expiry *policy* is per-rail money-in behavior and stays out of the core
-  /// (seam §11.1.4).
+  /// §4 — one order, one state machine. Transitions live in `Orders.mo`; expiry
+  /// *policy* is per-rail money-in behaviour and stays out of the core (§11.1.4).
+  ///
+  /// **A state no order can enter must not be representable** (§4). An unreachable
+  /// status has to be carried by every `switch` and asserted unreachable by a test
+  /// that passes whether or not the code is right. Deleting the state is the stronger
+  /// guarantee — the same move as `#cancelled → #paid` being absent from the matrix
+  /// rather than guarded.
   public type OrderStatus = {
     #created;
+    /// The buyer gave up before paying. Terminal.
+    #cancelled;
     #expired;
     #paid;
-    #minting;
-    #icpAtCmc;
     #delivered;
-    #awaitingTreasury;
-    #errorQueue;
+    /// A money position whose outcome is not known — typically a transfer past the
+    /// ledger's ~24 h dedup window. A human checks the ledger. The promise is **still
+    /// held**.
+    #needsReview;
+    /// The operator ended the order, having refunded by hand. Terminal, and the
+    /// promise is **released**.
+    #abandoned;
   };
 
   public func statusToText(status : OrderStatus) : Text {
     switch (status) {
       case (#created) "Created";
+      case (#cancelled) "Cancelled";
       case (#expired) "Expired";
       case (#paid) "Paid";
-      case (#minting) "Minting";
-      case (#icpAtCmc) "IcpAtCMC";
       case (#delivered) "Delivered";
-      case (#awaitingTreasury) "AwaitingTreasury";
-      case (#errorQueue) "ErrorQueue";
+      case (#needsReview) "NeedsReview";
+      case (#abandoned) "Abandoned";
     };
   };
 
-  /// §3/§6.1 pricing snapshot captured at order creation. `lockedCycles`
-  /// is the §3 quantity for the *expected* (tier) amount; this snapshot is
-  /// what lets the webhook honor a **different actual paid amount** at the
-  /// same locked rate + fee formula instead of a fresh rate — "no quote
-  /// drift" holds even off the happy path.
+  /// §3 pricing snapshot captured at order creation, carrying the gross amount, both
+  /// rate inputs and the fee formula from one consistent epoch.
+  ///
+  /// ⚠️ **The webhook does not reprice from it.** The session carries the amount we
+  /// set, so the webhook requires the paid amount to *equal* the quote and a mismatch
+  /// delivers nothing. The snapshot is **evidence**: what a buyer recomputes their own
+  /// price from, and the record of which rates a delivered order was priced at.
   public type Pricing = {
-    /// Gross USD cents the order was quoted for (the tier price).
+    /// Gross USD cents the order was quoted for.
     usdCents : Nat;
-    /// XDR-per-USD rate (micros, Forex.mo) locked at creation.
-    xdrPerUsdMicros : Nat;
+    /// USD per ICP × 10⁶ from the Exchange Rate Canister at creation.
+    usdPerIcpMicros : Nat;
+    /// XDR per ICP × 10⁴ from the Cycles Minting Canister at creation.
+    ///
+    /// **Both rate inputs are stored, never the derived result.** Anyone can query
+    /// the XRC and the CMC and recompute the quote from first principles; storing only
+    /// the derived number makes the price checkable but not *auditable*.
+    xdrPermyriadPerIcp : Nat;
+    /// XRC quality signal for the ICP price: how many sources answered out of how many
+    /// were asked, and their spread. A price from two sources is not the same product
+    /// as one from twelve.
+    rateStandardDeviation : Nat;
+    rateReceivedRates : Nat;
+    rateQueriedSources : Nat;
     /// §3 fee formula at creation.
     feeBps : Nat;
     feeFixedCents : Nat;
+    /// When the rate pair was **read**, not when the order was created.
+    ///
+    /// Quotes are served from a timer-refreshed cache, so these rates predate the
+    /// order by up to the staleness window. Without this field an auditor comparing
+    /// the stored rates against XRC/CMC history at `createdAtNs` concludes the quote
+    /// used the wrong rate.
+    ratesFetchedAtNs : Int;
   };
 
-  /// Immutable order record; status changes go through Orders.transition,
-  /// which returns an updated copy. `lockedCycles` is the cycle *quantity*
-  /// locked at creation (§3) — fulfillment delivers exactly this many cycles
-  /// regardless of later rate movement; the operator absorbs ICP-cost drift.
-  /// (Webhook ingestion replaces it via Orders.markPaid when the actual paid
-  /// amount differs from the quoted tier, repriced from `pricing`.)
+  /// Immutable order record; status changes go through `Orders.transition`, which
+  /// returns an updated copy.
   public type Order = {
     id : OrderId;
     owner : Owner;
     rail : Rail;
     destination : Destination;
+    /// The cycle *quantity* locked at creation (§3) — delivery sends exactly this many
+    /// regardless of later rate movement.
+    ///
+    /// ⚠️ **Nothing may write it after creation.** The promise tally is exact rather
+    /// than conservative because of that; a second writer takes it away **silently**.
     lockedCycles : Nat;
     pricing : Pricing;
     status : OrderStatus;
+    /// What the buyer **actually paid**, in USD cents; null until paid. Distinct from
+    /// `pricing.usdCents`, which is what the order was *quoted*. Recorded on the money
+    /// record so "what did this buyer pay?" is answerable from state.
+    paidUsdCents : ?Nat;
+    /// Why an order is `#expired`; null for every other status.
+    ///
+    /// Buyer cancellation is **not** here — it is `#cancelled`, a status. "Can this
+    /// still be paid?" is a transition-matrix question, and answering it with a status
+    /// plus a runtime check on a provenance field puts two owners on one decision.
+    expiredBy : ?ExpiredBy;
+    /// Stripe's `expires_at` for this order's session, in **nanoseconds** (Stripe
+    /// reports Unix seconds). Null until the session exists — an order still null
+    /// minutes after creation is a stranded-capacity signal.
+    ///
+    /// ⚠️ **Stamped once and never re-stamped.** Expiry used to be recomputed from the
+    /// *current* global TTL, so changing that config retroactively re-dated every
+    /// existing order. This is the deadline, singular.
+    expiresAtNs : ?Int;
+    /// The Checkout Session this order is paid through.
+    ///
+    /// The URL must survive a reload while the order is payable: without it a buyer
+    /// who closed the tab has no route back, and the open-order cap then refuses them
+    /// a second attempt.
+    stripeSessionId : ?Text;
+    stripeSessionUrl : ?Text;
     createdAtNs : Int;
     updatedAtNs : Int;
+    /// When this order first crossed the delivery alert threshold while waiting, or
+    /// null if it never did.
+    ///
+    /// ⚠️ **Setting this must NOT move `updatedAtNs`.** `Delivery.waitStage` reads
+    /// `updatedAtNs` as the held-since clock, so touching it here resets the very wait
+    /// being recorded and the order can never reach the max-hold bound.
+    delayedAtNs : ?Int;
+    /// Why an operator ended this order; set only on `#abandoned`.
+    abandonedReason : ?Text;
+    /// Problems that belong to this order, with their resolution state. See
+    /// `Problems.mo` for the kinds and the admission rule they must pass.
+    problems : [Problem];
   };
 
-  /// §5.1 — deterministic transfer args persisted *before* the ledger call
-  /// (write-intent-before-call). Replaying the identical args is safe: the
-  /// ledger dedups on `created_at_time` within its ~24h window.
+  /// Why an `#expired` order expired. **Two producers and only two** — Stripe's
+  /// `checkout.session.expired`, and a failure to create the session at all. Nothing
+  /// else can reach `#expired`, so null means "not `#expired`".
+  public type ExpiredBy = {
+    #sessionExpired;
+    #sessionFailed;
+  };
+
+  /// An order-bound problem. The order it hangs off supplies the identity, so no arm
+  /// carries an `orderId`.
+  /// Which KIND of problem, without its payload — the discriminator on its own.
+  ///
+  /// ⚠️ **Tag-only, and that asymmetry is the design.** `ProblemKind`'s cases carry
+  /// different payloads: `#deliveryStuck` a stage, the other three a `paymentRef` plus
+  /// figures. A caller naming *which kind to resolve* has none of that — and
+  /// `resolve_problem` already takes the reference as its own parameter — so mirroring
+  /// the full variant would demand data the caller cannot have.
+  ///
+  /// ⚠️ **This replaces a `Text` argument.** The set is closed and always was:
+  /// `Problems.kindToText` rendered these four names and `Orders.unresolvedOfKind`
+  /// compared against that rendering, so a misspelled tag resolved nothing and said so.
+  /// Fail-closed, but the compiler checked nothing — now a wrong tag cannot be encoded
+  /// at all, and the operator console types its command off the actor rather than
+  /// composing a string.
+  public type ProblemKindTag = {
+    #duplicate;
+    #deliveryStuck;
+    #refundAfterDelivery;
+    #paidNotCredited;
+  };
+
+  public type ProblemKind = {
+    /// Refund-resolvable — a genuine second, distinct payment for an order already
+    /// handled.
+    #duplicate : { paymentRef : Text };
+    /// A delivery stopped where it cannot continue automatically. Not
+    /// refund-resolvable: the fiat is in, and what happens next depends on the money
+    /// position rather than on the reason it stopped.
+    ///
+    /// ⚠️ **`stage` is a stringly-typed discriminator and must stay advisory.** It is
+    /// safe only because the journal is the authority. **Never branch a money decision
+    /// on comparing it** — ask the journal the way `Delivery.terminationFor` does, or
+    /// make it a variant first.
+    #deliveryStuck : { stage : Text };
+    /// Not refund-resolvable — the money moved *both* ways. A `charge.refunded`
+    /// arrived for a payment already delivered as cycles, so the fiat went back and the
+    /// cycles are irreversibly gone. This **records a loss to reconcile** rather than
+    /// starting a recovery flow.
+    #refundAfterDelivery : {
+      paymentRef : Text;
+      cycles : Nat;
+      /// Cumulative cents returned to the payer. Sized, because a partial refund is a
+      /// partial loss and the operator reconciles against Stripe by **amount**.
+      refundedCents : Nat;
+      /// Whether that settled the whole charge.
+      fullRefund : Bool;
+    };
+    /// Stripe says this session was paid and we never credited it.
+    ///
+    /// ⚠️ **The order stays `#created` deliberately.** `#created → #paid` is the only
+    /// edge a resent event can travel, so keeping it there is what preserves the remedy
+    /// that delivers to the buyer. Route it anywhere else and the operator's only exit
+    /// becomes a refund.
+    #paidNotCredited : { paymentRef : Text; sessionId : Text };
+  };
+
+  public type Problem = {
+    kind : ProblemKind;
+    detail : Text;
+    filedAtNs : Int;
+    resolvedAtNs : ?Int;
+  };
+
+  /// §5.1 — deterministic transfer args persisted *before* the ledger call. Replaying
+  /// the identical args is safe: the ledger dedups on `created_at_time` within its
+  /// ~24 h window.
   public type TransferIntent = {
     createdAtTimeNs : Nat64;
-    amountE8s : Nat;
+    amountCycles : Nat;
     to : Account;
     memo : Blob;
   };
 
-  /// §4.2 — per-order money-out journal: transfer intent, block_index,
-  /// minted cycles, retries, timestamps, destination.
+  /// Every `OrderStatus`, and its index — **the pair a test needs to iterate the status
+  /// space, kept HERE so `-Werror` can enforce it.**
+  ///
+  /// **Do not move this into `test/`, where it cannot do its job.** Measured:
+  /// `mops check -- -Werror` does not compile `test/` at all, and `mops test` passes
+  /// `--hide-warnings` (see `mops.toml`), so a non-exhaustive match in a test file is a
+  /// suppressed M0145 — the array stays at its old length while the type grows, and every
+  /// suite iterating it quietly tests less than it claims. In `src/` the switch below is
+  /// compiled by the gate, so an eighth status **fails the build** until it is handled.
+  ///
+  /// ⚠️ **What this buys, exactly: `-Werror` forces the VISIT, and the array is two
+  /// lines below it.** Adding a status fails the build at five sites, this being one, so
+  /// the developer lands here — and `allStatuses` and `statusCount` are the next thing
+  /// they read. That is a real improvement on the previous arrangement, where the switch
+  /// sat in a test file and nothing in the gate compiled it.
+  ///
+  /// ⚠️ **What it does NOT buy: a mechanical tie.** Handle the new case here, leave the
+  /// array at seven, and the bitmask test still passes — it sees seven statuses each
+  /// exactly once and has no way to ask the type how many there are. A variant omitted
+  /// from BOTH remains undetectable, as `test/orders.test.mo` said before this moved and
+  /// as it still says. Motoko cannot express the enumeration, so the guarantee is
+  /// "you cannot compile without reading this", not "you cannot get it wrong".
+  ///
+  /// @test-oracle — no production caller by design: production switches on a status, it
+  /// never enumerates the space. The enumeration exists so a test can.
+  public func statusIndex(status : OrderStatus) : Nat {
+    switch (status) {
+      case (#created) 0;
+      case (#cancelled) 1;
+      case (#expired) 2;
+      case (#paid) 3;
+      case (#delivered) 4;
+      case (#needsReview) 5;
+      case (#abandoned) 6;
+    };
+  };
+
+  /// The status space as a value. Hand-written, and tied to the type by `statusIndex`
+  /// above plus the bitmask test that consumes both.
+  public let allStatuses : [OrderStatus] = [
+    #created,
+    #cancelled,
+    #expired,
+    #paid,
+    #delivered,
+    #needsReview,
+    #abandoned,
+  ];
+
+  /// The size the bitmask expects, stated once rather than spelled `2 ** 7 - 1` at the
+  /// assertion — where a stale literal reads as arithmetic rather than as a claim.
+  public let statusCount : Nat = 7;
+
+  /// What a buyer asked to buy: a configured preset, or an amount they typed.
+  ///
+  /// ⚠️ **In `Types` rather than the mixin because `Purchase.plan` takes it**.
+  /// Candid derives the name from this declaration, so the interface is unchanged.
+  public type Amount = {
+    #tier : Text;
+    /// Gross USD cents, straight from the buyer. Bounded by
+    /// `Gate.Config`'s floor and ceiling like any other amount — and bounded
+    /// **here**, not only in the frontend, because a frontend-only bound is not a
+    /// bound.
+    #custom : Nat;
+  };
+
+  /// §4.2 — per-order money-out journal.
   public type JournalEntry = {
     orderId : OrderId;
     status : OrderStatus;
     destination : Destination;
     transferIntent : ?TransferIntent;
     blockIndex : ?Nat;
-    cyclesMinted : ?Nat;
+    cyclesDelivered : ?Nat;
     retries : Nat;
+    /// The ledger's own words from the most recent failed attempt, or null if nothing
+    /// has failed.
+    ///
+    /// **Overwritten, not accumulated.** An operator acts on the *current* obstacle;
+    /// a growing list of every historical rejection is unbounded state fed by retries,
+    /// and `retries` already says how many there were.
+    lastError : ?Text;
     createdAtNs : Int;
     updatedAtNs : Int;
   };

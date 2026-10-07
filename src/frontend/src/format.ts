@@ -1,55 +1,95 @@
-// Pure presentation/encoding helpers — no DOM, no agent, unit-tested.
+// Pure presentation/encoding helpers. No DOM, no agent, unit-tested.
 
-/// OrderStatus variant keys as the Candid wrapper surfaces them.
-export type StatusKey =
-  | "created"
-  | "expired"
-  | "paid"
-  | "minting"
-  | "icpAtCmc"
-  | "awaitingTreasury"
-  | "delivered"
-  | "errorQueue";
+import { Principal } from "@icp-sdk/core/principal";
+
+import type { CancelOrderError, CreateOrderError, OrderStatus, Reason } from "./bindings/backend";
+
+/// OrderStatus variant keys, DERIVED from the generated enum.
+///
+/// ⚠️ **This was a hand-written union of seven strings, and `main.ts` reached it through
+/// `order.status as unknown as StatusKey`.** A double cast launders the real type away: add
+/// a status to the canister and the cast still compiles, `statusInfo`'s switch falls off
+/// the end returning `undefined`, and `.label` throws on the buyer's order page. The
+/// interface grew a status and the mirror did not.
+///
+/// The template literal is what makes an enum usable as a plain string union: bindgen
+/// renders an all-empty Candid variant as a TypeScript `enum`, whose members are nominal,
+/// so `"delivered"` is not assignable to `OrderStatus` and every comparison against a
+/// literal would break. `${OrderStatus}` yields the VALUES as a union, so the comparisons
+/// keep working and a new status becomes a non-exhaustive-switch compile error instead.
+export type StatusKey = `${OrderStatus}`;
 
 export interface StatusInfo {
   label: string;
-  /// Index into STEPS for the progress timeline; -1 = off the happy path.
-  step: number;
+  /// What the page LEADS with: the outcome, in the buyer's terms.
+  ///
+  /// ⚠️ **The heading used to be status-neutral ("Your purchase") with the status in a
+  /// badge in the far corner, and that neutrality is what made the page mute.** The one
+  /// question a buyer has on a delivered order is "did I get my cycles", and it was
+  /// answered three times and prominently zero times: a small pill, a receipt row, and
+  /// a block index. A page should announce its own state.
+  ///
+  /// Takes the credited quantity where the status has one to name, so the outcome and
+  /// the amount are one statement rather than a label and a lookup.
+  headline: (cycles?: string) => string;
+  /// The one thing to DO about this status, or nothing.
+  ///
+  /// ⚠️ **Explicit, replacing a `label !== pill` string comparison.** That heuristic
+  /// worked while the page led with a badge; with a headline it broke, because the
+  /// headline and the label differ in wording for every status, so the line reappeared
+  /// under a headline that already said it. Four statuses have nothing to add and three
+  /// carry an instruction: that is a fact about the statuses, not about how two strings
+  /// happen to compare, so it is stated once here and switched exhaustively.
+  guidance?: string;
+  /// The status as a badge: two or three words, never a sentence.
+  ///
+  /// ⚠️ **Separate from `label` so the two can never say the same thing twice.** The
+  /// order page shows this always and shows `label` only when it says MORE, which is
+  /// exactly the statuses whose label carries an instruction ("Expired. This order can
+  /// no longer be paid"). One field, one place, and the page needs no list of which
+  /// statuses are wordy.
+  pill: string;
   /// Stop polling: the backend will never move this order again.
   terminal: boolean;
   tone: "pending" | "active" | "ok" | "warn" | "err";
 }
 
-export const STEPS = ["Awaiting payment", "Paid", "Minting", "Delivered"] as const;
-
 export function statusInfo(key: StatusKey): StatusInfo {
   switch (key) {
     case "created":
-      return { label: "Awaiting payment", step: 0, terminal: false, tone: "active" };
+      return { label: "Awaiting payment", pill: "Awaiting payment", headline: () => "Awaiting your payment", terminal: false, tone: "active" };
+    case "cancelled":
+      // The buyer's own decision, and its own status — so a reload no longer
+      // tells someone who cancelled that their order "expired".
+      return { label: "Cancelled", pill: "Cancelled", headline: () => "You cancelled this order", terminal: true, tone: "warn" };
     case "expired":
-      // §4 expiry is advisory — a genuine late payment still completes, so
-      // the order stays pollable.
-      return { label: "Expired — a completed payment still goes through", step: 0, terminal: false, tone: "warn" };
+      // TERMINAL: there is no `expired → paid` edge, so a payment arriving now
+      // becomes an operator obligation to refund rather than cycles. The copy must
+      // never suggest a completed payment could still go through.
+      return { label: "Expired. This order can no longer be paid", pill: "Expired", headline: () => "This order expired", guidance: "This order can no longer be paid.", terminal: true, tone: "warn" };
     case "paid":
-      return { label: "Payment received", step: 1, terminal: false, tone: "active" };
-    case "awaitingTreasury":
-      return { label: "Queued — waiting on treasury", step: 1, terminal: false, tone: "warn" };
-    case "minting":
-      return { label: "Minting cycles", step: 2, terminal: false, tone: "active" };
-    case "icpAtCmc":
-      return { label: "Minting cycles (ICP at the minting canister)", step: 2, terminal: false, tone: "active" };
+      return { label: "Payment received", pill: "Paid", headline: () => "Payment received, delivering now", terminal: false, tone: "active" };
     case "delivered":
-      return { label: "Delivered", step: 3, terminal: true, tone: "ok" };
-    case "errorQueue":
-      return { label: "Needs operator attention — contact support", step: -1, terminal: true, tone: "err" };
+      return { label: "Delivered", pill: "Delivered", headline: (cycles) => cycles === undefined ? "Delivered" : `${cycles} delivered`, terminal: true, tone: "ok" };
+    case "needsReview":
+      // NOT terminal: the operator can still end it, and until they do the order
+      // holds its promise. Polling continues so the buyer sees that happen.
+      return { label: "Needs operator attention. Contact support", pill: "Needs attention", headline: () => "This order needs attention", guidance: "Contact support.", terminal: false, tone: "err" };
+    case "abandoned":
+      return { label: "Ended by support. Contact us about a refund", pill: "Ended", headline: () => "This order was ended by support", guidance: "Contact us about a refund.", terminal: true, tone: "err" };
   }
 }
 
-/// Append client_reference_id to a Stripe Payment Link (§6.1) — the one URL
-/// param the whole attribution flow hangs off.
-export function paymentLinkWithRef(url: string, clientReferenceId: string): string {
-  const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}client_reference_id=${encodeURIComponent(clientReferenceId)}`;
+/// The payment reference for an order: `<principal>_<orderId>`.
+///
+/// Computed here rather than returned by `create_order`. It appears on the order page,
+/// because it is the reference on the buyer's card receipt and therefore the thing they
+/// quote to support.
+///
+/// It must match `Orders.clientReferenceId` exactly — the whole webhook
+/// attribution path parses this shape.
+export function clientReferenceFor(principalText: string, orderId: string): string {
+  return `${principalText}_${orderId}`;
 }
 
 /// "3.353 T" style cycle quantities; exact below 1M.
@@ -74,6 +114,244 @@ export function formatUsdCents(cents: bigint): string {
   return `$${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
 }
 
+// --- pricing (§3) ------------------------------------------------------------
+//
+// The backend prices everything. `quote_previews` runs the *same* `quoteCents`
+// function `create_order` runs, so a quoted figure and the order that follows it
+// cannot disagree. Nothing here reimplements the formula.
+//
+// The one deliberate exception is `cyclesForCents` below, used only to re-derive
+// a *finished* order's price from its receipt. That duplication is the point: a
+// backend confirming its own arithmetic proves nothing, so verification has to
+// happen somewhere the operator does not control.
+
+export interface FeeConfig {
+  feeBps: bigint;
+  feeFixedCents: bigint;
+}
+
+/// `netCents × xdrPermyriadPerIcp × 10¹² / usdPerIcpMicros`, floored. Mirrors
+/// `Pricing.cyclesForCents`. Receipt verification only; see the note above.
+export function cyclesForCents(
+  net: bigint,
+  xdrPermyriadPerIcp: bigint,
+  usdPerIcpMicros: bigint,
+): bigint | null {
+  if (usdPerIcpMicros === 0n) return null;
+  return (net * xdrPermyriadPerIcp * 1_000_000_000_000n) / usdPerIcpMicros;
+}
+
+/// The fee split as ROWS, or the reason the amount cannot carry the fee at all.
+///
+/// ⚠️ **The rows exist because a dot-separated sentence is not a breakdown.** The buy
+/// view printed all of this as one line of prose, `charged · processing · buys cycles ·
+/// margin`, which is a table written sideways: nothing lines up, the figures cannot be
+/// compared down a column, and it grew to a hundred characters.
+///
+/// The `#tooSmall` case is not a formatting variant: the processor's fee exceeds the
+/// whole amount, so there is no split to show and the buyer has to pick more.
+export type FeeRows =
+  | { kind: "rows"; pay: string; processing: string; net: string; margin: string }
+  | { kind: "tooSmall"; message: string };
+
+export function feeRows(
+  grossCents: bigint,
+  feeCents: bigint,
+  netCents: bigint | undefined,
+  fee: FeeConfig,
+): FeeRows {
+  if (netCents === undefined) {
+    return {
+      kind: "tooSmall",
+      message: `Payment processing (${formatUsdCents(feeCents)}) would exceed ${formatUsdCents(grossCents)}. Pick a larger amount.`,
+    };
+  }
+  const rate = fee.feeBps === 0n && fee.feeFixedCents === 0n
+    ? "no processor fee"
+    : `${Number(fee.feeBps) / 100}% + ${formatUsdCents(fee.feeFixedCents)}`;
+  return {
+    kind: "rows",
+    pay: formatUsdCents(grossCents),
+    processing: `${formatUsdCents(feeCents)} (${rate})`,
+    net: formatUsdCents(netCents),
+    margin: "none",
+  };
+}
+
+/// What actually lands. The cycles ledger charges a flat fee to accept a
+/// deposit, so the buyer receives less than the order locks, on every order.
+/// Not grossed up on-chain by design (covering a per-order fee out of the reserve
+/// would be griefable), so it has to be shown here instead.
+///
+/// `transferFee` comes from `quote_previews` rather than a constant in this file —
+/// it is the ledger's number, not ours.
+export function cyclesCredited(cycles: bigint | null, transferFee: bigint): bigint | null {
+  if (cycles === null) return null;
+  return cycles > transferFee ? cycles - transferFee : 0n;
+}
+
+/// The credited quantity, and separately why it differs from what was bought.
+///
+/// ⚠️ **The FIGURE and its explanation are separate values, because the checkout puts
+/// them in different places.** They used to exist only glued into one sentence, so the
+/// order page rendered a hundred-character line of prose inside a value cell where a
+/// buyer was looking for a number. `estimateLine` is now built from this, so the two
+/// renderings cannot drift: one primitive, two presentations.
+///
+/// `note` is null when the two figures do not READ differently. `formatCycles` shows
+/// three decimals, so on a multi-trillion order the 100 M transfer fee rounds away and
+/// "3.5 T credited, 3.5 T sent less the 100 M fee" reads as a contradiction rather
+/// than a disclosure.
+export function creditedSplit(
+  cycles: bigint,
+  transferFee: bigint,
+): { figure: string; note: string | null } {
+  const credited = formatCycles(cyclesCredited(cycles, transferFee)!);
+  const sent = formatCycles(cycles);
+  return {
+    figure: `${credited} cycles`,
+    note: credited === sent
+      ? null
+      : `${sent} sent, less the cycles ledger's ${formatCycles(transferFee)} transfer fee`,
+  };
+}
+
+/// The line under an amount, stating what arrives and that the rate is now
+/// locked once the order exists.
+///
+/// **The rate is what gets locked, not the quantity.** Money-out never re-reads
+/// a rate, so market movement after creation changes nothing. But if a payment
+/// arrives for a different amount than quoted, the quantity is re-derived at
+/// that same locked rate. Saying "cycles are locked" would be wrong in that one
+/// case; saying the rate is locked is always true.
+export function estimateLine(cycles: bigint | null, transferFee: bigint): string {
+  if (cycles === null) {
+    return "No exchange rate available right now. Orders are paused until one is.";
+  }
+  const { figure, note } = creditedSplit(cycles, transferFee);
+  const shown = formatCycles(cyclesCredited(cycles, transferFee)!);
+  if (note !== null) {
+    return `≈ ${figure.replace(" cycles", "")} cycles credited (${note})`;
+  }
+  // Just the number that lands, because this line is the figure a buyer is choosing
+  // BETWEEN — on a tile, or in the "this amount now buys" notice. The fee belongs to
+  // the amount they have chosen, where `depositFeeLine` states it unconditionally;
+  // repeating it here puts the same parenthetical on every tile as well.
+  return `≈ ${shown} cycles`;
+}
+
+/// The cycles ledger's fee, stated whether or not it changes the figure.
+///
+/// ⚠️ **Unconditional, because a disclosure that hides itself at scale is not one.**
+/// `creditedSplit.note` answers "why do these two numbers differ", so it is silent
+/// exactly when they read the same — which above roughly 1 T is *always*, since
+/// `formatCycles` shows three decimals and the fee rounds away. The buy view's only
+/// other statement of the fee was `renderDestinationNote`, deleted with the
+/// destination form, and it printed the fee whenever there was one. So raising
+/// `maxPurchaseUsdCents` past the display's resolution silently dropped the last
+/// disclosure of a charge the buyer pays on every order.
+///
+/// Null only when the fee is not KNOWN: a failed `icrc1_fee` read leaves it at zero,
+/// and inventing "no fee" there would promise cycles that will not arrive.
+export function depositFeeLine(cycles: bigint, transferFee: bigint): string | null {
+  if (transferFee === 0n) return null;
+  // Built on `creditedSplit` rather than beside it, so the two cannot state different
+  // fees for one order.
+  const { note } = creditedSplit(cycles, transferFee);
+  return note
+    ?? `Less the cycles ledger's ${formatCycles(transferFee)} transfer fee, too small`
+      + ` to change the figure at this size.`;
+}
+
+/// How long until a deadline, for a live countdown.
+///
+/// ⚠️ **A countdown, not a timestamp**, because the window is thirty-five minutes:
+/// "reserved until 14:32" misleads a buyer who looked away,
+/// and a buyer who starts paying near the deadline loses the attempt — they are
+/// not charged, but the session closes under them. So the copy leans on the
+/// remaining time rather than the wall clock.
+///
+/// Returns null when the deadline has passed, which the caller renders as expired
+/// rather than as "0 minutes left".
+export function timeUntil(deadlineMs: number, nowMs: number): string | null {
+  const remainingMs = deadlineMs - nowMs;
+  if (remainingMs <= 0) return null;
+  const totalMinutes = Math.floor(remainingMs / 60_000);
+  if (totalMinutes >= 1) {
+    const seconds = Math.floor((remainingMs % 60_000) / 1_000);
+    return `${totalMinutes} min ${String(seconds).padStart(2, "0")} s`;
+  }
+  return `${Math.max(1, Math.ceil(remainingMs / 1_000))} s`;
+}
+
+/// How long ago something happened, for an operator reading a staleness figure.
+///
+/// ⚠️ **Separate from `timeUntil`, which returns null for anything in the past.** Reusing
+/// it here would render every observation as absent, which reads as "never observed" for a
+/// reserve that was observed a minute ago: the one number this line exists to report.
+///
+/// Coarse on purpose. An operator asks "is this stale", not "how many seconds".
+export function formatDuration(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "under a minute";
+  if (minutes === 1) return "1 minute";
+  if (minutes < 60) return `${minutes} minutes`;
+  const hours = Math.floor(minutes / 60);
+  if (hours === 1) return "1 hour";
+  if (hours < 24) return `${hours} hours`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? "1 day" : `${days} days`;
+}
+
+/// ⚠️ **Split from `formatDuration` because "ago" is not always the right suffix.** A
+/// delayed delivery has WAITED three hours; it did not start waiting "3 hours ago" as a
+/// separate fact. The first version of the worklist row rendered "waiting 213 days ago",
+/// which a screenshot caught and no assertion would have.
+export function formatAgo(pastMs: number, nowMs: number): string {
+  const elapsed = nowMs - pastMs;
+  // A clock that is behind reads as the future. Say so rather than printing a negative.
+  if (elapsed < 0) return "in the future (check the clock)";
+  return `${formatDuration(elapsed)} ago`;
+}
+
+/// Tolerance the UI allows between the figure a buyer was shown and the one the
+/// gateway locks: 5%.
+///
+/// Rates refresh on a timer, so an exact match would bounce a purchase for a
+/// move too small to care about. And every bounce is a buyer wondering whether
+/// their card was charged. 5% is wide enough that ordinary drift passes and
+/// narrow enough that a real dislocation still stops and asks.
+///
+/// Only ever applied downward: more cycles than shown is never a reason to
+/// refuse. The tolerance lives here, not in the backend, because it is a
+/// *client policy* — the backend enforces exactly the minimum it is handed, so a
+/// caller that needs an exact quantity can pin one.
+export const QUOTE_SLIPPAGE_BPS = 500n;
+
+/// The `minCycles` to pin for a displayed estimate.
+export function minAcceptableCycles(shown: bigint): bigint {
+  return (shown * (10_000n - QUOTE_SLIPPAGE_BPS)) / 10_000n;
+}
+
+/// Stated when the locked quantity differs from the estimate the buyer saw —
+/// within tolerance, so the order went through. Silence here would be the
+/// surprise; the number changed and they should hear it from us.
+export function lockedVsEstimate(locked: bigint, shown: bigint | null): string | null {
+  if (shown === null || locked === shown) return null;
+  const direction = locked > shown ? "more" : "fewer";
+  return (
+    `The rate moved slightly between the estimate and the lock: this order is for ` +
+    `${formatCycles(locked)} cycles, ${direction} than the ${formatCycles(shown)} shown. ` +
+    `This is the locked quantity and it will not change again.`
+  );
+}
+
+/// Why the estimate carries a "≈" before the order exists, and stops once it
+/// does. Shown next to the estimate so nobody has to guess whether the number
+/// they are looking at can still move.
+export const RATE_LOCK_NOTE =
+  "The exchange rate is locked when you create the order. It never changes afterwards, however long you take to pay or however far the market moves.";
+
 export function shortPrincipal(text: string): string {
   return text.length <= 16 ? text : `${text.slice(0, 5)}…${text.slice(-5)}`;
 }
@@ -82,48 +360,85 @@ export function nsToMillis(ns: bigint): number {
   return Number(ns / 1_000_000n);
 }
 
-export type SubaccountParse =
-  | { ok: true; value: Uint8Array | null }
-  | { ok: false; error: string };
+// --- receipts (§8) -----------------------------------------------------------
 
-/// Optional ICRC-1 subaccount as hex: empty = none; up to 64 hex digits,
-/// left-padded to 32 bytes (the conventional short form for low subaccounts).
-export function parseSubaccountHex(input: string): SubaccountParse {
-  const hex = input.trim().replace(/^0x/i, "");
-  if (hex.length === 0) return { ok: true, value: null };
-  if (!/^[0-9a-fA-F]+$/.test(hex)) return { ok: false, error: "subaccount must be hex" };
-  if (hex.length > 64) return { ok: false, error: "subaccount is at most 32 bytes (64 hex digits)" };
-  const padded = hex.padStart(64, "0");
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
-    bytes[i] = parseInt(padded.slice(i * 2, i * 2 + 2), 16);
+export interface ReceiptVerification {
+  netCents?: bigint;
+  usdPerIcpMicros: bigint;
+  xdrPermyriadPerIcp: bigint;
+  rateReceivedRates: bigint;
+  rateQueriedSources: bigint;
+}
+
+export interface ReceiptCheck {
+  /// The quantity recomputed from the receipt's own inputs.
+  recomputed: bigint | null;
+  /// Whether it equals the cycles the order locked.
+  matches: boolean;
+  /// One line stating the arithmetic, with the numbers filled in.
+  formula: string;
+}
+
+/// Recompute the quote from a receipt and compare it to what was locked.
+///
+/// The point is that this runs on the buyer's machine from values they can fetch
+/// from the XRC and the CMC themselves. So "you were charged correctly" is
+/// something they check, not something the operator asserts.
+export function checkReceipt(
+  v: ReceiptVerification,
+  lockedCycles: bigint,
+  /// The simulation divisor from `pricing_status().config`. `1n` in
+  /// production, where every term below is unchanged.
+  ///
+  /// ⚠️ **Read from config rather than from the order.** The divisor is expected
+  /// constant for the life of the data — `set_pricing_config` refuses to change it
+  /// while orders exist — so reading it here gives the same answer storing it on
+  /// the order would have, without a stable-shape change for a test-phase feature.
+  divisor: bigint = 1n,
+): ReceiptCheck {
+  const net = v.netCents;
+  if (net === undefined) {
+    return {
+      recomputed: null,
+      matches: false,
+      formula: "This order has no net amount: the fee formula would have consumed it.",
+    };
   }
-  return { ok: true, value: bytes };
+  // ⚠️ **`recomputed` stays the UNSCALED quantity, and that is the point.** It is
+  // what production would have locked for this purchase, recomputed here from the
+  // two rate inputs the order carries — so in simulation mode the receipt shows
+  // both legs: what production would send, and what this gateway actually did.
+  const recomputed = cyclesForCents(net, v.xdrPermyriadPerIcp, v.usdPerIcpMicros);
+  const scaled = recomputed === null ? null : recomputed / divisor;
+  const usdPerIcp = (Number(v.usdPerIcpMicros) / 1e6).toFixed(2);
+  const xdrPerIcp = (Number(v.xdrPermyriadPerIcp) / 1e4).toFixed(4);
+  const base =
+    `${formatUsdCents(net)} net × ${xdrPerIcp} XDR/ICP ÷ $${usdPerIcp}/ICP × 10¹² = ` +
+    `${recomputed === null ? "not yet" : formatCycles(recomputed)}`;
+  return {
+    recomputed,
+    matches: scaled !== null && scaled === lockedCycles,
+    // The divisor appears as a term only when there is one, so a production
+    // receipt reads exactly as it did before this feature existed.
+    formula:
+      divisor === 1n || scaled === null
+        ? base
+        : `${base}, ÷ ${divisor} simulation divisor = ${formatCycles(scaled)}`,
+  };
 }
 
-// --- ck-USDC rail (§6.2) -----------------------------------------------------
-
-/// 1¢ = 10⁴ ck-USDC units (6 decimals, 1:1 USD peg) — mirrors CkUsdc.unitsForCents.
-export const CK_UNITS_PER_CENT = 10_000n;
-
-export function ckUnitsForCents(cents: bigint): bigint {
-  return cents * CK_UNITS_PER_CENT;
-}
-
-/// "5.01 ckUSDC" — 6-decimal token amount, trailing zeros trimmed but always
-/// at least two decimals (money reads wrong as "5.0").
-export function formatCkUsdcUnits(units: bigint): string {
-  const whole = units / 1_000_000n;
-  const frac = (units % 1_000_000n).toString().padStart(6, "0");
-  const trimmed = frac.replace(/0+$/, "");
-  const shown = trimmed.length < 2 ? frac.slice(0, 2) : trimmed;
-  return `${whole}.${shown} ckUSDC`;
+/// How well-sourced the quoted ICP price was. A rate assembled from two
+/// exchanges is not the same product as one from twelve, and the difference is
+/// otherwise invisible to the buyer.
+export function rateSourceNote(received: bigint, queried: bigint): string {
+  if (queried === 0n) return "";
+  return `priced from ${received} of ${queried} exchange sources`;
 }
 
 export type UsdAmountParse = { ok: true; cents: bigint } | { ok: false; error: string };
 
 /// User-typed dollar amount → cents. Strict shape (optional $, up to two
-/// decimals) — anything fancier silently guessing at money is worse than
+/// decimals). Anything fancier silently guessing at money is worse than
 /// asking the user to retype.
 export function parseUsdAmount(input: string): UsdAmountParse {
   const text = input.trim().replace(/^\$/, "");
@@ -134,141 +449,365 @@ export function parseUsdAmount(input: string): UsdAmountParse {
   return { ok: true, cents };
 }
 
-export type CkCreateError =
-  | { __kind__: "anonymous" }
-  | { __kind__: "idGeneration" }
-  | { __kind__: "railDisabled" }
-  | { __kind__: "rateUnavailable" }
-  | { __kind__: "zeroAmount" }
-  | { __kind__: "amountBelowFees" }
-  | { __kind__: "belowMinimum"; belowMinimum: bigint }
-  | { __kind__: "aboveMaximum"; aboveMaximum: bigint };
+/// Gate.mo admission refusal. Every case is a *temporary operational* state
+/// except the two amount bounds, so the copy has to tell the user whether to change
+/// something or come back later. A generic failure would leave them retrying a
+/// button that cannot succeed.
+///
+/// ⚠️ **Aliased from the GENERATED bindings, never re-declared.** A hand-written mirror
+/// drifts in both directions at once — carrying variants the backend deleted while
+/// missing ones it added, so the refusals a buyer is most likely to see render as
+/// `undefined`. Nothing catches that: the switch stays exhaustive over the *stale* union
+/// and `main.ts` reaches it through an `as` cast. Aliasing makes the next backend change
+/// a compile error here.
+/// A type-only import, so this module stays runtime-dependency-free.
+export type GateReason = Reason;
 
-export function createCkOrderErrorMessage(err: CkCreateError): string {
-  switch (err.__kind__) {
-    case "railDisabled":
-      return "The ck-USDC rail is not enabled yet — check back soon.";
-    case "zeroAmount":
-      return "Amount must be more than $0.";
-    case "belowMinimum":
-      return `The minimum is ${formatUsdCents(err.belowMinimum)}.`;
-    case "aboveMaximum":
-      return `The maximum is ${formatUsdCents(err.aboveMaximum)}.`;
-    case "amountBelowFees":
-      return "Fees would swallow this amount — enter a larger one.";
-    case "rateUnavailable":
-      return "Exchange rate temporarily unavailable — nothing was charged. Try again in a minute.";
-    case "anonymous":
-      return "Sign in with Internet Identity first.";
-    case "idGeneration":
-      return "Could not generate an order id — try again.";
+export function gateReasonMessage(reason: GateReason): string {
+  switch (reason.__kind__) {
+    case "amountAboveMax":
+      return `The maximum for a single purchase is ${formatUsdCents(reason.amountAboveMax.maxUsdCents)}.`;
+    case "amountBelowMin":
+      return `The minimum for a single purchase is ${formatUsdCents(reason.amountBelowMin.minUsdCents)}.`;
+    case "tooManyOpenOrders":
+      return `You already have ${reason.tooManyOpenOrders.open} unpaid orders open (limit ${reason.tooManyOpenOrders.max}). Pay or abandon one before starting another.`;
+    case "reserveShort":
+      // The one refusal a smaller amount can fix, so it says so and says how much
+      // is actually available rather than "try again later" — which would send the
+      // buyer away from a purchase the gateway can still make.
+      return (
+        `The gateway can only deliver ${formatCycles(reason.reserveShort.available)} cycles right now, ` +
+        `and this amount asks for ${formatCycles(reason.reserveShort.requested)}. ` +
+        `Nothing was charged. Try a smaller amount, or come back later.`
+      );
+    case "canisterCyclesLow":
+      return "Purchases are temporarily unavailable while the gateway is topped up. Nothing was charged; please try again later.";
+    // ⚠️ **Both refusals give the buyer the SAME instruction, and an earlier version
+    // got this wrong.** It withheld the allow-list from `#unboundedGiveaway` on the
+    // reasoning that the empty list is the operator's misconfiguration, so asking for
+    // access "would not help". That is false: the condition is
+    // `testPayments && listEmpty && reserveFunded`, so adding the asking buyer makes
+    // the list non-empty, clears the condition, AND admits them. Asking is exactly
+    // the fix.
+    //
+    // The two stay separate REASONS because they are different diagnoses for the
+    // operator — one says the list is missing, the other says it is working — and
+    // they keep separate counters. What converges is the buyer's next action.
+    case "unboundedGiveaway":
+    case "buyerNotAllowed":
+      return (
+        "This gateway is in a testing phase, so only invited buyers can purchase. "
+        + "Nothing was charged. Sign in, copy your principal from the top of the page, "
+        + "and send it to the operator to be added."
+      );
   }
 }
 
-export type ClaimError =
-  | { __kind__: "anonymous" }
-  | { __kind__: "notFound" }
-  | { __kind__: "wrongRail" }
-  | { __kind__: "inFlight" }
-  | { __kind__: "staleIntent" }
-  | { __kind__: "notClaimable"; notClaimable: string }
-  | { __kind__: "retryable"; retryable: string }
-  | { __kind__: "ledgerRejected"; ledgerRejected: string }
-  | { __kind__: "badFee"; badFee: { expectedFee: bigint } }
-  | { __kind__: "insufficientAllowance"; insufficientAllowance: { allowance: bigint; required: bigint } }
-  | { __kind__: "insufficientFunds"; insufficientFunds: { balance: bigint; required: bigint } };
+/// The invite-only notice, defined once because both refusals give the buyer the same
+/// instruction. See `gateReasonMessage` for why they converge despite being separate
+/// reasons.
+///
+/// ⚠️ Points at the header rather than printing the principal: this renders for an
+/// anonymous visitor too (the faucet condition is a fact about the gateway, not about
+/// the caller), and there is no principal to print until they sign in.
+const PRE_ANNOUNCED_INVITE_ONLY =
+  "This gateway is in a testing phase, so only invited buyers can purchase. "
+  + "Sign in, copy your principal from the top of the page, and send it to the "
+  + "operator to be added.";
 
-export interface ClaimErrorInfo {
-  message: string;
-  /// What the user can actually do next: re-approve a bigger allowance, retry
-  /// the claim, fund their account, or nothing (operator/support territory).
-  action: "approve" | "retry" | "fund" | "none";
-  /// For action === "approve": the ledger-authoritative allowance to approve
-  /// (supersedes whatever the UI derived from config).
-  requiredUnits?: bigint;
-}
+/// The same two refusals, worded for a buyer who has **not attempted anything yet**.
+///
+/// **Why a second table rather than reusing `gateReasonMessage`: "Nothing was
+/// charged" is true after an attempt and misleading before one.** In a pre-emptive
+/// notice it implies a purchase was tried and reversed, which is confusing at exactly
+/// the moment the page is trying to be clear. Everything else about the copy is
+/// unchanged — neither message names an allow-list to a buyer who cannot act on it,
+/// and neither describes the gateway's misconfiguration in operator vocabulary.
+///
+/// ⚠️ **This table IS the filter.** A key present here means "invariant for this
+/// caller until an operator acts, so pre-announcing it cannot go stale"; absent means
+/// the refusal belongs at the moment of the attempt. `Partial<Record<GateReasonTag,
+/// …>>` keys it on the real Candid tag union, so there is no second hand-written list
+/// of tags for the caller to drift from — the mistake this repo has now removed four
+/// times.
+///
+/// ⚠️ Deliberately NOT extended to `#reserveShort` or `#canisterCyclesLow`: both are
+/// volatile and amount-dependent (a smaller amount may work), so a banner rendered
+/// from them is stale by construction. That is the rule `main.ts`'s `loadMarket`
+/// documents, and this table is the narrow exception to it, not its replacement.
+export const PRE_ANNOUNCED_GATE_REASONS: Partial<Record<GateReason["__kind__"], string>> = {
+  // ⚠️ Both say the same thing, and both name the ACTION. "Not accepting purchases
+  // right now" reads as an outage and leaves a tester with nothing to do; what they
+  // need is to know they must be invited and how to ask.
+  unboundedGiveaway: PRE_ANNOUNCED_INVITE_ONLY,
+  buyerNotAllowed: PRE_ANNOUNCED_INVITE_ONLY,
+};
 
-/// §6.2 claim-error → user-action mapping. The two amount-short arms are
-/// definite rejections (the backend dropped the intent; nothing moved), so
-/// they read as clean "fix and retry" — never as a stuck order.
-export function claimErrorInfo(err: ClaimError): ClaimErrorInfo {
-  switch (err.__kind__) {
-    case "insufficientAllowance": {
-      const { allowance, required } = err.insufficientAllowance;
-      return {
-        message: `You approved ${formatCkUsdcUnits(allowance)} but ${formatCkUsdcUnits(required)} is needed (price + ledger fee). Approve at least that and claim again — nothing was charged.`,
-        action: "approve",
-        requiredUnits: required,
-      };
-    }
-    case "insufficientFunds": {
-      const { balance, required } = err.insufficientFunds;
-      return {
-        message: `Your ck-USDC balance is ${formatCkUsdcUnits(balance)}; ${formatCkUsdcUnits(required)} is needed (price + ledger fee). Top up and claim again — nothing was charged.`,
-        action: "fund",
-      };
-    }
-    case "retryable":
-      return { message: "The ledger is temporarily unavailable — try claiming again in a moment.", action: "retry" };
-    case "inFlight":
-      return { message: "A claim for this order is already in progress — give it a moment.", action: "retry" };
-    case "badFee":
-      return {
-        message: `The ledger's transfer fee changed (it now expects ${formatCkUsdcUnits(err.badFee.expectedFee)}) — the operator needs to update the rail config. Nothing was charged.`,
-        action: "none",
-      };
-    case "staleIntent":
-      return {
-        message: "This order's payment needs operator attention — you will not be charged twice. Contact support with the order id.",
-        action: "none",
-      };
-    case "ledgerRejected":
-      return { message: `The ledger rejected the payment: ${err.ledgerRejected}. Contact support with the order id.`, action: "none" };
-    case "notClaimable":
-      return { message: `This order is past payment (status: ${err.notClaimable}).`, action: "none" };
-    case "wrongRail":
-      return { message: "This order is not a ck-USDC order.", action: "none" };
-    case "notFound":
-      return { message: "Order not found.", action: "none" };
-    case "anonymous":
-      return { message: "Sign in with Internet Identity first.", action: "none" };
-  }
-}
-
-/// icrc2_approve errors come from the raw (non-bindgen) ledger actor, so the
-/// variant is a one-key record — key on it structurally.
-export function approveErrorMessage(err: Record<string, unknown>): string {
-  if ("InsufficientFunds" in err) {
-    const balance = (err.InsufficientFunds as { balance: bigint }).balance;
-    return `Your ck-USDC balance (${formatCkUsdcUnits(balance)}) cannot cover the approval fee — top up first.`;
-  }
-  if ("BadFee" in err) {
-    const expected = (err.BadFee as { expected_fee: bigint }).expected_fee;
-    return `The ledger expects a ${formatCkUsdcUnits(expected)} approval fee — reload and try again.`;
-  }
-  if ("TemporarilyUnavailable" in err) return "The ledger is temporarily unavailable — try again in a moment.";
-  if ("GenericError" in err) {
-    return `The ledger rejected the approval: ${(err.GenericError as { message: string }).message}`;
-  }
-  const key = Object.keys(err)[0] ?? "unknown";
-  return `Approval failed (${key}) — try again.`;
+/// The `#quoteChanged` refusal, in the buyer's terms. Leads with "nothing was
+/// charged" because that is the first thing someone wants to know when a payment
+/// flow refuses.
+export function quoteChangedMessage(quoted: bigint, transferFee: bigint): string {
+  return (
+    `The exchange rate moved while this page was open. Nothing was charged. ` +
+    `This amount now buys ${estimateLine(quoted, transferFee)}. ` +
+    `Click again to create the order and lock that rate.`
+  );
 }
 
 /// User-facing messages for create_order errors (variant key → text).
+///
+/// `notAdmitted` carries a payload, so callers with the full error value should
+/// pass its reason to `gateReasonMessage` instead of only the key. The key
+/// alone cannot say whether the user should change the amount or wait.
 export function createOrderErrorMessage(key: string): string {
   switch (key) {
+    case "quoteChanged":
+      // Callers with the full error should use `quoteChangedMessage`. The key
+      // alone cannot say what the amount buys now.
+      return "The exchange rate moved past the accepted tolerance. Nothing was charged. Check the updated amount and confirm.";
+    case "notAdmitted":
+      return "Purchases are temporarily unavailable. Nothing was charged. Please try again later.";
     case "rateUnavailable":
       // §3.1 fail-closed: never price on a stale rate.
-      return "Exchange rate temporarily unavailable — nothing was charged. Try again in a minute.";
+      return "Exchange rate temporarily unavailable. Nothing was charged. Try again in a minute.";
     case "tierBelowFees":
       return "This tier is misconfigured (payment fees would exceed it). Pick another tier.";
     case "unknownTier":
-      return "That tier no longer exists — reload the page for current tiers.";
+      return "That tier no longer exists. Reload the page for current tiers.";
     case "anonymous":
       return "Sign in with Internet Identity first.";
     case "idGeneration":
-      return "Could not generate an order id — try again.";
+      return "Could not generate an order id. Try again.";
+    case "destinationNotOwned":
+      // Unreachable from this app — it only ever sends the signed-in
+      // principal's own account. Worded for the buyer anyway, because the one
+      // way to see it is a page running against a gateway that disagrees with
+      // it about who the caller is.
+      return "Cycles can only be delivered to your own account. Nothing was charged. Reload the page and try again.";
+    case "simulationScaleTooSmall":
+      // ⚠️ Names the SIMULATION as the cause, not payment processing.
+      // `tierBelowFees` above says fees would exceed the amount, which
+      // is true for its own cause and false for this one: here the amount is fine
+      // and the operator's divisor scaled the cycles below what the cycles ledger
+      // charges to accept a deposit. A larger amount can still help, so it says so.
+      return (
+        "This gateway is running a scaled-down simulation, and at that scale this amount " +
+        "delivers too few cycles to cover the ledger's deposit fee. Nothing was charged. " +
+        "Try a larger amount."
+      );
+    case "reserveUnavailable":
+      // Fails closed: selling against an unknown balance is what the check exists to
+      // prevent.
+      return "The gateway could not confirm its cycle reserve. Nothing was charged. Try again in a minute.";
+    case "sessionUnavailable":
+      return "Card payments are unavailable right now. Nothing was charged. Please try again later.";
+    case "cancelledDuringCreation":
+      return "This order was cancelled while it was being created. Nothing was charged. Start a new order if you still want it.";
     default:
+      // ⚠️ **Kept as a runtime escape hatch, NOT as the place a missing variant
+      // lands.** A canister upgraded ahead of the frontend can send a tag this
+      // build has never heard of, and showing its name beats showing nothing. An
+      // omission for a variant this build DOES know about is a compile error in
+      // `CREATE_ORDER_ERROR_KEYS` below.
       return `Order creation failed: ${key}`;
   }
+}
+
+/// What a buyer is told when their cancel refuses.
+///
+/// ⚠️ **The copy lives here; the FACTS stay on the canister.** §7.2 is the rule: a
+/// refusal's payload must carry every fact its sentence asserts, which is why
+/// `notCancellable` and `settledInFlight` carry a status. Anything a buyer needs to
+/// verify independently — the status, the figures — is on `get_order` and `receipt`,
+/// not here.
+export function cancelOrderErrorMessage(error: CancelOrderError): string {
+  switch (error.__kind__) {
+    case "notFound":
+      return "That order no longer exists. Reload the page.";
+    case "alreadyExpired":
+      // The opposite case from `notCancellable`: nothing was charged, so there is
+      // nothing to undo. A stale tab is enough to reach it.
+      return "This order already expired, so there is nothing to cancel. Nothing was charged.";
+    case "notCancellable":
+      return `This order is ${statusInfo(`${error.notCancellable.status}`).label.toLowerCase()} and cannot be cancelled. It will deliver, or contact support.`;
+    case "sessionNotClosed":
+      // ⚠️ Three causes and no way to tell them apart: the payment completed, the
+      // session had already expired, or Stripe refused the request. This sentence has to
+      // be true of all three, so it says what happens next in each rather than claiming
+      // which one it was.
+      return "We could not close the payment session. If it was paid it will deliver; if not it expires on its own. Refresh the page to see which.";
+    case "stripeUnavailable":
+      return "Could not reach the payment provider to cancel. Try again, or the order expires on its own.";
+    case "credentialsRefused":
+      return "The payment provider refused this gateway's credentials. An operator has been notified; the order expires on its own if it is not paid.";
+    case "settledInFlight":
+      return `This order was already ${statusInfo(`${error.settledInFlight.status}`).label.toLowerCase()} while the cancel was in flight. The status shown is current.`;
+    default:
+      // Runtime escape hatch for a canister ahead of this build, not the place a known
+      // variant lands: an omission is a compile error in the key list below.
+      return `Cancellation failed: ${(error as { __kind__: string }).__kind__}`;
+  }
+}
+
+/// Every `cancel_order` variant this build knows about.
+///
+/// `@test-oracle` — derived from the type rather than hand-written, because a
+/// hand-written mirror is what let three `create_order` variants render as their own tag
+/// names.
+export const CANCEL_ORDER_ERROR_KEYS: Record<CancelOrderError["__kind__"], true> = {
+  alreadyExpired: true,
+  credentialsRefused: true,
+  notCancellable: true,
+  notFound: true,
+  sessionNotClosed: true,
+  settledInFlight: true,
+  stripeUnavailable: true,
+};
+
+/// Every `create_order` variant this build knows about.
+///
+/// `@test-oracle` — no production caller by design: its whole value is that
+/// `format.test.ts` iterates a list DERIVED from the type instead of a hand-written
+/// copy. `scripts/check-unused-exports.py` skips marked exports, because otherwise the
+/// only way to satisfy that check is to delete the guarantee.
+///
+/// ⚠️ **This exists because the switch above takes a `string`, so a new backend
+/// variant cannot be a compile error there.** Three variants —
+/// `reserveUnavailable`, `sessionUnavailable` and `cancelledDuringCreation` —
+/// silently rendered as `"Order creation failed: reserveUnavailable"` for exactly
+/// that reason, and the test meant to catch it iterated a **hand-written** list of
+/// five keys, so it passed while three cases were missing. The list is derived
+/// from the type now, and `format.test.ts` iterates *this* rather than its own copy.
+export const CREATE_ORDER_ERROR_KEYS: Record<CreateOrderError["__kind__"], true> = {
+  anonymous: true,
+  cancelledDuringCreation: true,
+  destinationNotOwned: true,
+  idGeneration: true,
+  notAdmitted: true,
+  quoteChanged: true,
+  rateUnavailable: true,
+  reserveUnavailable: true,
+  sessionUnavailable: true,
+  simulationScaleTooSmall: true,
+  tierBelowFees: true,
+  unknownTier: true,
+};
+
+/// What a cycles-ledger BURN was actually for.
+///
+/// The ledger records `create_canister` and `withdraw` as the same `1burn` block with the
+/// same `op = "burn"` and the same `from` (the caller), so the memo is the only
+/// discriminator. It declares four block types and neither operation gets its own.
+///
+/// ⚠️ **Only ever call this on a BURN, and the reason is spoofing, not tidiness.**
+/// `WithdrawArgs` and `CreateCanisterArgs` have no `memo` field, so on those paths the
+/// LEDGER writes the memo and a caller cannot forge it. `TransferArgs` and `DepositArgs`
+/// do take a caller-supplied memo. Decoding memos wherever they appear would let anyone
+/// send this account a transfer memoed `FE * 32` and have this app announce "Created a
+/// canister" in a history the buyer reconciles against.
+///
+/// **A creation tells you THAT, never WHICH.** The created id comes back in
+/// `CreateCanisterSuccess.canister_id`, the method reply, and never enters the block. So
+/// `#creation` carries no principal and no later read can recover one.
+///
+/// ⚠️ **ATTEMPTED, not succeeded, and the names say so deliberately.** A `create_canister`
+/// that FAILS writes the same `FE * 32` burn (`CreateCanisterError.FailedToCreate` carries
+/// a `fee_block`), and a `withdraw` that fails writes the same `CBOR[target]` burn
+/// (`FailedToWithdraw.fee_block`). Both were measured, against a nonexistent subnet and a
+/// nonexistent canister. The burn is the CHARGE, not the outcome, so labelling either
+/// "Created" or "Topped up" claims an outcome the block cannot support.
+///
+/// The outcome shows only in the REFUND that follows: a failed creation mints back with
+/// memo `FD * 32`, a failed withdraw with `FF * 32`. This module deliberately does NOT
+/// decode those. `DepositArgs` takes a caller-supplied memo and a deposit IS a mint, so
+/// anyone could deposit memoed `FF * 32` and forge a refund row. Burns are safe precisely
+/// because none of the four burn paths accepts a memo argument.
+export type BurnPurpose =
+  | { kind: "creation" }
+  | { kind: "topUp"; canister: string }
+  | { kind: "unknown" };
+
+/// The sentinel the ledger writes for a canister creation: 32 bytes of 0xFE. Verified
+/// against two creations of different canisters, whose memos were byte-identical (so it
+/// carries no per-canister data), and against a creation that FAILED, which wrote the
+/// same bytes.
+const CREATE_SENTINEL_BYTE = 0xfe;
+const CREATE_SENTINEL_LEN = 32;
+
+export function decodeBurnMemo(memo: [] | [Uint8Array]): BurnPurpose {
+  if (memo.length === 0) return { kind: "unknown" };
+  const raw = memo[0]!;
+  if (
+    raw.length === CREATE_SENTINEL_LEN
+    && raw.every((b) => b === CREATE_SENTINEL_BYTE)
+  ) {
+    return { kind: "creation" };
+  }
+  // A withdraw's memo is CBOR: 0x81 = array(1), 0x4a = byte string of length 10, then a
+  // 10-byte canister principal. Matched exactly rather than by prefix, so a longer or
+  // shorter payload falls through to `unknown` instead of decoding a truncated id.
+  if (raw.length === 12 && raw[0] === 0x81 && raw[1] === 0x4a) {
+    try {
+      return { kind: "topUp", canister: Principal.fromUint8Array(raw.slice(2)).toText() };
+    } catch {
+      // A blob that is the right shape but not a valid principal is data this app does
+      // not understand, not a reason to drop the row.
+      return { kind: "unknown" };
+    }
+  }
+  return { kind: "unknown" };
+}
+
+/// The order a delivery transfer paid out, from its memo.
+///
+/// `Delivery.mo` sets the transfer's memo to the order id as UTF-8, and the receipt's
+/// own documentation names that as the proof: the block is checkable against the ledger
+/// "by the order id in the transfer's memo".
+///
+/// ⚠️ **Gated on the SENDER, and that gate is the whole safety argument.**
+/// `TransferArgs` carries a caller-supplied memo, so any stranger can transfer one
+/// cycle to a buyer with a memo naming a real order. Ungated, this page would print
+/// "Order f22bd6dc" on a row the gateway had nothing to do with, inside the list a
+/// buyer reconciles their money against. Only a transfer FROM the gateway's own
+/// account can carry a claim about a gateway order.
+///
+/// Contrast `decodeBurnMemo`: no burn path accepts a memo argument, so those need no
+/// sender gate. This one does precisely because transfers do.
+export function decodeOrderMemo(
+  memo: [] | [Uint8Array],
+  fromOwner: string,
+  gatewayPrincipal: string | undefined,
+): string | null {
+  // No configured gateway means no trusted sender, so nothing is attributable.
+  if (gatewayPrincipal === undefined || gatewayPrincipal === "") return null;
+  if (fromOwner !== gatewayPrincipal) return null;
+  if (memo.length === 0) return null;
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(memo[0]!);
+  } catch {
+    return null;
+  }
+  // Order ids are hex. Validated rather than trusted so a memo that decodes to text
+  // cannot put arbitrary characters into a link's href, and so the value is one
+  // `parseRoute` will actually resolve.
+  //
+  // ⚠️ **This check, not the `fatal` flag above, is what makes the result safe.**
+  // Non-fatal decoding would yield replacement characters, which fail here too, so
+  // `fatal: true` is redundant belt-and-braces: removing it does not fail the suite.
+  // Removing THIS line does.
+  return /^[0-9a-f]{8,64}$/.test(text) ? text : null;
+}
+
+/// The amount labels, in the tense the order has actually reached.
+///
+/// ⚠️ **Two independent tenses, not one.** A `#paid` order HAS paid but has NOT yet
+/// received, so a single "is it done" flag would print "You received" beside cycles
+/// that have not moved. Each label follows its own fact.
+export function amountLabels(key: StatusKey): { pay: string; receive: string } {
+  const paid = key === "paid" || key === "delivered";
+  return {
+    pay: paid ? "You paid" : "You pay",
+    receive: key === "delivered" ? "You received" : "You receive",
+  };
 }

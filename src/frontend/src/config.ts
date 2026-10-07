@@ -1,0 +1,186 @@
+/// Deployment-wide constants that must exist in exactly one place.
+import { safeGetCanisterEnv } from "@icp-sdk/core/agent/canister-env";
+
+/// Is this page being served by a local `icp network`?
+///
+/// The same guard `auth.ts` uses to pick the local Internet Identity, and for the same
+/// reason: a production origin can never take the local branch.
+export function isLocalNetwork(hostname: string = window.location.hostname): boolean {
+  return (
+    hostname === "localhost"
+    || hostname === "127.0.0.1"
+    || hostname === "[::1]"
+    || hostname.endsWith(".localhost")
+  );
+}
+
+/// The origin Internet Identity derives this app's principals from, or `undefined` when
+/// this page is already being served from it.
+///
+/// ⚠️ **II derives a principal PER ORIGIN, so this decides who a buyer is.** Served from a
+/// custom domain with nothing pinned, the same person signing in at
+/// `cyclepay.raymondk.co` and at the canister URL gets two principals, two cycles
+/// balances, and an allow-list entry that works on one and not the other.
+///
+/// ⚠️ **Only the ALTERNATIVE origin passes this; the primary must not.** A page served at
+/// the canister's own gateway origin returns `undefined` here. II canonicalises the three
+/// official gateway domains during delegation, so passing one as a derivation origin is
+/// the case its own guidance says breaks authentication rather than a no-op.
+///
+/// **Pinned to the FRONTEND CANISTER's origin, never to the domain the page came from,
+/// and that is what makes the domain reversible.** A *custom domain* used as the
+/// derivation origin is irreversible after the first purchase. Deriving from the canister
+/// id instead means this test domain and whatever production domain is chosen both yield
+/// the SAME principals, so the decision stops being one-way. The canister id is the one
+/// identifier a domain change cannot alter.
+///
+/// The cost is a second file: II fetches `/.well-known/ii-alternative-origins` from THIS
+/// origin, cross-origin, and refuses to derive for any serving origin the file does not
+/// list. It needs a CORS header as well as a media type; `public/_headers` carries both.
+///
+/// **`icp.net` rather than `icp0.io`, and the two are NOT two identities** — corrected
+/// against the Internet Identity guidance, which states that II canonicalises `ic0.app`,
+/// `icp0.io` and `icp.net` to one form during delegation, so a canister served at any of
+/// them yields the same principal. The spelling is therefore a readability choice, not an
+/// irreversible one; `icp.net` is the current default for new frontend canisters. What IS
+/// irreversible is canister-origin versus custom-domain, which is the choice above.
+export function derivationOrigin(
+  hostname: string = window.location.hostname,
+  frontendId: string | undefined = frontendCanisterId(),
+): string | undefined {
+  if (isLocalNetwork(hostname)) return undefined;
+  // ⚠️ **Fail CLOSED.** Returning `undefined` here would let II derive from the serving
+  // domain instead: a working app, a silently different principal, and the one outcome
+  // that cannot be undone once a buyer has cycles on it. A refused sign-in is recoverable;
+  // a split identity is not. `actor.ts` already throws when the sibling backend id is
+  // missing, so this is the same posture on the key that decides identity rather than
+  // reachability.
+  // ⚠️ Callers: `auth.ts` builds its client lazily so this reaches the caller rather than
+  // module scope, and `canonicalAppDomain` below propagates it. See `auth.ts` for why the
+  // page survives today and what would stop that being true.
+  if (frontendId === undefined) {
+    throw new Error(
+      "ic_env carries no PUBLIC_CANISTER_ID:frontend, so the Internet Identity derivation "
+        + "origin cannot be determined. Refusing to sign in rather than deriving a "
+        + "different principal from this domain. Redeploy the frontend with `icp deploy`.",
+    );
+  }
+  // The primary origin: this page IS the derivation origin, so it passes nothing.
+  if (GATEWAYS.some((g) => hostname === `${frontendId}.${g}`)) return undefined;
+  return `https://${frontendId}.icp.net`;
+}
+
+/// The official canister gateway domains. II canonicalises all three to one form, so a
+/// page served at any of them is already on the derivation origin.
+const GATEWAYS = ["icp.net", "icp0.io", "ic0.app"];
+
+/// The frontend canister's own id, from the `ic_env` cookie the canister sets.
+///
+/// Read rather than compiled in, for the reason `actor.ts` reads the backend id the same
+/// way: a build that hardcoded it would be wrong on any other deployment of this repo.
+///
+/// ⚠️ **Measured, not assumed: the deployed canister really does publish this key.**
+/// `Set-Cookie` from a live `@dfinity/static-site` canister carries
+/// `PUBLIC_CANISTER_ID:frontend` beside the backend id and the root key. Injectable
+/// above because `safeGetCanisterEnv` reads nothing under jsdom, so a unit test asserting
+/// the mainnet branch through it would assert `undefined` and pass for the wrong reason.
+function frontendCanisterId(): string | undefined {
+  return safeGetCanisterEnv()?.["PUBLIC_CANISTER_ID:frontend"];
+}
+
+/// The value `icp identity link web --app` expects: a **bare domain**, no scheme.
+///
+/// Verified against icp-cli 1.2.0 rather than assumed —
+/// `icp identity link web --help` describes `--app <APP>` as the "Delegation
+/// domain to get an identity for (e.g. oisy.com)", and the guide's example is
+/// `--app nns.ic0.app`. An earlier version of this file passed
+/// `window.location.origin`, i.e. `https://host`, which is not the documented
+/// form; the whole point of printing this command is that the buyer ends up on
+/// the principal their cycles are in, so the wrong shape here is the exact
+/// failure the command exists to prevent.
+///
+/// ⚠️ **It is the DERIVATION origin's host, not the page's.** `--app` selects which
+/// origin's principal the CLI asks for, so with a derivation origin pinned, printing
+/// `window.location.host` would hand the buyer a delegation for the serving domain —
+/// a different principal from the one the page is showing them, with an empty balance.
+/// That is precisely the failure this function was written to prevent, one level up: it
+/// used to be `window.location.origin` (wrong shape), then `window.location.host` (right
+/// shape, right origin only while there was no derivation origin), and now follows
+/// whatever the principals are actually derived from.
+///
+/// `host`, not `hostname`: a port is part of the identity of a local origin.
+export function canonicalAppDomain(
+  page: { host: string; hostname: string } = window.location,
+  frontendId: string | undefined = frontendCanisterId(),
+): string {
+  const derived = derivationOrigin(page.hostname, frontendId);
+  return derived === undefined ? page.host : new URL(derived).host;
+}
+
+/// The identity name the CLI stores this site's delegation under.
+///
+/// Named after the app rather than `dev`, which is what this used to be: `dev` is
+/// what everyone's throwaway local identity is already called, so the command
+/// silently proposed overwriting it. A per-app name also makes it obvious which
+/// site a stored identity came from once someone has linked two.
+export const CLI_IDENTITY = "cyclepay-id";
+
+/// ⚠️ **These five commands are an ORDERED sequence, and the order is load-bearing.**
+/// Five commands in four numbered steps — step 3 verifies twice, the principal and the
+/// balance — which is why the page's summary counts steps and this list counts
+/// functions. Counting the same things differently is how it came to say four of both.
+/// `identityDefaultCommand` is what makes `icp identity principal`, `icp cycles
+/// balance` and `icp deploy` act as the linked identity. Without it a buyer links
+/// successfully, verifies with an explicit `--identity` flag, sees a match, and then
+/// deploys as whatever their default was — a different principal with an empty
+/// balance. That step was missing from the page entirely, which is why the verify
+/// commands below carry no `--identity` flag: they are correct only *after* step 2,
+/// and printing them with the flag hid the fact that step 2 was needed at all.
+
+/// 1. Link the browser identity to the CLI.
+///
+/// Always with the explicit `--app`. Omitted, icp-cli lets the auth domain pick
+/// its default (`cli.id.ai` for id.ai), which is a different principal and an
+/// empty balance.
+export function linkIdentityCommand(profile = CLI_IDENTITY): string {
+  return `icp identity link web ${profile} --app ${canonicalAppDomain()}`;
+}
+
+/// 2. Make it the identity every later command acts as.
+export function identityDefaultCommand(profile = CLI_IDENTITY): string {
+  return `icp identity default ${profile}`;
+}
+
+/// 3a. The principal, which must equal the one this page shows.
+///
+/// No `--identity` flag: step 2 already made it the default, and the page's own value
+/// is the thing to compare against. Deliberately NOT phrased as "the link command
+/// prints the principal" — the CLI guide does not say it does, and inventing output is
+/// how a tour teaches someone to expect something that never appears.
+export function verifyPrincipalCommand(): string {
+  return "icp identity principal";
+}
+
+/// 3b. The balance, which must equal the one this page shows.
+export function verifyBalanceCommand(): string {
+  return "icp cycles balance";
+}
+
+/// 4. Deploy the buyer's own project to mainnet.
+export function deployCommand(): string {
+  return "icp deploy -e ic";
+}
+
+/// Where the prerequisite is actually performed: the identity provider's own settings.
+///
+/// ⚠️ **The guide alone was not enough.** The page said "enable CLI access for your
+/// Internet Identity" and linked the guide, without saying WHERE — so a buyer had to
+/// read a docs page to discover that the switch lives in their id.ai settings. Naming
+/// the place and linking straight to it is the difference between a warning and an
+/// instruction, and without the switch the link command fails outright.
+export const IDENTITY_SETTINGS = "https://id.ai";
+
+/// The guide for enabling CLI access on an Internet Identity — the prerequisite that
+/// makes the link command possible at all.
+export const CLI_IDENTITY_GUIDE =
+  "https://cli.internetcomputer.org/1.4/guides/managing-identities/#signing-in-as-a-specific-app";

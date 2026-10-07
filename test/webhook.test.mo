@@ -1,13 +1,17 @@
 import { test; suite } "mo:test";
+import Problems "../src/backend/Problems";
+import Array "mo:core/Array";
+import Map "mo:core/Map";
 import Nat "mo:core/Nat";
 import Principal "mo:core/Principal";
 import Runtime "mo:core/Runtime";
 import Text "mo:core/Text";
 import AuditLog "../src/backend/AuditLog";
-import ErrorQueue "../src/backend/ErrorQueue";
+import Orphans "../src/backend/Orphans";
 import Http "../src/backend/Http";
 import Idempotency "../src/backend/Idempotency";
 import Orders "../src/backend/Orders";
+import Set "mo:core/Set";
 import Types "../src/backend/Types";
 import Card "../src/backend/rails/Card";
 import Util "../src/backend/Util";
@@ -15,7 +19,7 @@ import Util "../src/backend/Util";
 // Task 8 — webhook ingestion (§6.1 complete), end to end over crafted
 // *signed* payloads: verify → dedup → claimed-not-trusted attribution →
 // honor the actual paid amount → #paid, with every failure landing in the
-// §4.1 Type 1 error queue. Signatures are minted with signedPayloadMac,
+// §4.1 error queue. Signatures are produced with signedPayloadMac,
 // which card.test.mo pins against externally computed vectors — so these
 // tests exercise ingestion, not the MAC's self-consistency.
 
@@ -27,41 +31,76 @@ let alice = Principal.fromText("aaaaa-aa");
 let orderId = "000102030405060708090a0b0c0d0e0f";
 let goodRef = "aaaaa-aa_" # orderId;
 
-// Matches the forex.test.mo quote vector: 500¢ gross, fee ⌈500·290/104⌉+30
-// = 45¢, net 455¢ @ 737_000 micros → 3_353_350_000_000 cycles.
+// The shared §3 vector, chosen so the at-cost property is visible: 500¢ gross,
+// fee ⌈500·290/10⁴⌉+30 = 45¢, net 455¢. At $4.55/ICP that net buys exactly one
+// ICP, worth 35_000 × 10⁸ = 3.5 T cycles at the protocol rate. Money in, exactly
+// that much value out — if those two ever disagree, the formula is wrong.
 let pricing : Types.Pricing = {
   usdCents = 500;
-  xdrPerUsdMicros = 737_000;
+  usdPerIcpMicros = 4_550_000; // $4.55 per ICP
+  xdrPermyriadPerIcp = 35_000; // 3.5 XDR per ICP
+  rateStandardDeviation = 0;
+  rateReceivedRates = 5;
+  rateQueriedSources = 5;
   feeBps = 290;
   feeFixedCents = 30;
+  // Deliberately EARLIER than any order's createdAtNs in these fixtures: the rate pair
+  // is read before the order exists, which is why it is recorded separately.
+  ratesFetchedAtNs = 1;
 };
-let lockedCycles : Nat = 3_353_350_000_000;
+let lockedCycles : Nat = 3_500_000_000_000;
 
 func freshDeps() : Card.Deps {
   {
+    // No cancel requested by default: these tests are about ingestion. The
+    // cancel-attribution case builds its own set below.
+    cancelRequests = Set.empty<Types.OrderId>();
     orders = Orders.emptyStore();
     dedup = Idempotency.emptyStore();
-    errorQueue = ErrorQueue.emptyStore();
-    errorQueueCapacity = 10;
+    orphanStore = Orphans.emptyStore();
+    orphanCapacity = 10;
+    // Unset: these tests are about ingestion, not Stripe-mode configuration.
+    // The livemode gate has its own suite below.
+    expectLivemode = null;
     auditLog = AuditLog.emptyLog();
     auditLogCapacity = 100;
+    paidIntents = Map.empty<Text, Types.OrderId>();
+    // Well above the 500¢ tier these tests use, so the ceiling is out of the
+    // way except where a test deliberately probes it.
+    maxPurchaseUsdCents = 100_000;
   };
 };
 
 func withOrder(deps : Card.Deps, rail : Types.Rail) {
-  switch (Orders.create(deps.orders, orderId, #ii(alice), rail, #canister(alice), lockedCycles, pricing, 100)) {
+  switch (Orders.create(deps.orders, orderId, #ii(alice), rail, #cyclesLedgerAccount({ owner = alice; subaccount = null }), lockedCycles, pricing, 100)) {
     case (#ok(_)) {};
     case (#err(_)) Runtime.trap("test order creation failed");
   };
 };
 
 func checkoutBody(eventId : Text, intent : Text, ref : ?Text, amountCents : Nat, currency : Text, paymentStatus : Text) : Blob {
+  typedCheckoutBody("checkout.session.completed", eventId, intent, ref, amountCents, currency, paymentStatus, true);
+};
+
+/// The session shape, parameterised on event type and livemode — Stripe sends
+/// the identical object for `completed` and `async_payment_succeeded`.
+func typedCheckoutBody(
+  eventType : Text,
+  eventId : Text,
+  intent : Text,
+  ref : ?Text,
+  amountCents : Nat,
+  currency : Text,
+  paymentStatus : Text,
+  livemode : Bool,
+) : Blob {
   let refJson = switch (ref) {
     case (?r) "\"" # r # "\"";
     case (null) "null";
   };
   (
-    "{\"id\":\"" # eventId # "\",\"type\":\"checkout.session.completed\"," #
+    "{\"id\":\"" # eventId # "\",\"type\":\"" # eventType # "\"," #
+    "\"livemode\":" # (if (livemode) "true" else "false") # "," #
     "\"data\":{\"object\":{\"payment_intent\":\"" # intent # "\"," #
     "\"client_reference_id\":" # refJson # "," #
     "\"amount_total\":" # amountCents.toText() # "," #
@@ -74,10 +113,31 @@ func paidBody(eventId : Text, intent : Text, ref : ?Text, amountCents : Nat) : B
   checkoutBody(eventId, intent, ref, amountCents, "usd", "paid");
 };
 
+/// A **full** refund: cumulative refunded equals the charge total.
 func refundBody(eventId : Text, intent : Text) : Blob {
+  partialRefundBody(eventId, intent, 500, 500);
+};
+
+/// `charge.refunded` carries a charge, so `amount` is the total and
+/// `amount_refunded` is cumulative.
+func partialRefundBody(eventId : Text, intent : Text, refunded : Nat, chargeTotal : Nat) : Blob {
   (
-    "{\"id\":\"" # eventId # "\",\"type\":\"charge.refunded\"," #
-    "\"data\":{\"object\":{\"payment_intent\":\"" # intent # "\"}}}"
+    "{\"id\":\"" # eventId # "\",\"type\":\"charge.refunded\",\"livemode\":true," #
+    "\"data\":{\"object\":{\"payment_intent\":\"" # intent # "\"," #
+    "\"amount\":" # chargeTotal.toText() # "," #
+    "\"amount_refunded\":" # refunded.toText() # "}}}"
+  ).encodeUtf8();
+};
+
+func expiredBody(eventId : Text, ref : ?Text) : Blob {
+  let refJson = switch (ref) {
+    case (?r) "\"" # r # "\"";
+    case (null) "null";
+  };
+  (
+    "{\"id\":\"" # eventId # "\",\"type\":\"checkout.session.expired\",\"livemode\":true,"
+    # "\"data\":{\"object\":{\"id\":\"cs_test_x\",\"object\":\"checkout.session\","
+    # "\"client_reference_id\":" # refJson # "}}}"
   ).encodeUtf8();
 };
 
@@ -91,8 +151,12 @@ func signedReq(body : Blob) : Http.Request {
   };
 };
 
-func deliver(deps : Card.Deps, body : Blob) : Http.Response {
+func deliverFull(deps : Card.Deps, body : Blob) : Card.Outcome {
   Card.handleWebhook(deps, ?secret, signedReq(body), nowNs, Card.defaultToleranceSeconds);
+};
+
+func deliver(deps : Card.Deps, body : Blob) : Http.Response {
+  deliverFull(deps, body).response;
 };
 
 func bodyText(resp : Http.Response) : Text {
@@ -168,7 +232,7 @@ suite("parseEvent", func() {
       "\"data\":{\"object\":{\"payment_intent\":null,\"client_reference_id\":null," #
       "\"amount_total\":500,\"currency\":\"usd\",\"payment_status\":\"paid\"}}}"
     ).encodeUtf8();
-    assert Card.parseEvent(body) == #err(#missingField("data.object.payment_intent"));
+    assert Card.parseEvent(body) == #err(#missingField({ field = "data.object.payment_intent"; eventId = ?"evt_1" }));
   });
 
   test("non-integer amount_total is a missing field", func() {
@@ -177,19 +241,19 @@ suite("parseEvent", func() {
       "\"data\":{\"object\":{\"payment_intent\":\"pi_1\",\"client_reference_id\":null," #
       "\"amount_total\":5.5,\"currency\":\"usd\",\"payment_status\":\"paid\"}}}"
     ).encodeUtf8();
-    assert Card.parseEvent(body) == #err(#missingField("data.object.amount_total"));
+    assert Card.parseEvent(body) == #err(#missingField({ field = "data.object.amount_total"; eventId = ?"evt_1" }));
   });
 });
 
 suite("handleWebhook: envelope guards", func() {
   test("unprovisioned secret answers 503 (Stripe keeps retrying)", func() {
-    let resp = Card.handleWebhook(freshDeps(), null, signedReq(paidBody("evt_1", "pi_1", ?goodRef, 500)), nowNs, Card.defaultToleranceSeconds);
+    let resp = Card.handleWebhook(freshDeps(), null, signedReq(paidBody("evt_1", "pi_1", ?goodRef, 500)), nowNs, Card.defaultToleranceSeconds).response;
     assert resp.status_code == 503;
   });
 
   test("missing Stripe-Signature header is 400", func() {
     let req = { signedReq(paidBody("evt_1", "pi_1", ?goodRef, 500)) with headers = [] : [Http.HeaderField] };
-    assert Card.handleWebhook(freshDeps(), ?secret, req, nowNs, Card.defaultToleranceSeconds).status_code == 400;
+    assert Card.handleWebhook(freshDeps(), ?secret, req, nowNs, Card.defaultToleranceSeconds).response.status_code == 400;
   });
 
   test("bad signature is 400 and touches no state", func() {
@@ -197,21 +261,374 @@ suite("handleWebhook: envelope guards", func() {
     withOrder(deps, #card);
     let body = paidBody("evt_1", "pi_1", ?goodRef, 500);
     let forged = { signedReq(body) with body = paidBody("evt_1", "pi_1", ?goodRef, 9_999) };
-    assert Card.handleWebhook(deps, ?secret, forged, nowNs, Card.defaultToleranceSeconds).status_code == 400;
+    assert Card.handleWebhook(deps, ?secret, forged, nowNs, Card.defaultToleranceSeconds).response.status_code == 400;
     assert statusOf(deps) == #created;
     // the rejected delivery consumed nothing: the genuine one still lands
     assert deliver(deps, body).status_code == 200;
     assert statusOf(deps) == #paid;
   });
 
-  test("signed but unparseable body is 400", func() {
-    assert deliver(freshDeps(), ("not json at all").encodeUtf8()).status_code == 400;
+  test("a signed but unreadable body is acked 200, never retried into oblivion", func() {
+    // Once the MAC verifies, the event really came from Stripe. Parsing is
+    // deterministic, so a non-2xx would fail identically on every retry for the
+    // full ~3-day horizon — and Stripe can DISABLE an endpoint that keeps
+    // failing, which would then lose every legitimate webhook after it. Trading
+    // a permanent outage for a refusal that can never succeed is strictly worse.
+    let deps = freshDeps();
+    let resp = deliver(deps, ("not json at all").encodeUtf8());
+    assert resp.status_code == 200;
+    // Not silent: the operator has to be able to find it.
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.unparseable") != null;
   });
 
-  test("signed unhandled event type is acked 200 and ignored", func() {
-    let resp = deliver(freshDeps(), ("{\"id\":\"evt_x\",\"type\":\"invoice.paid\"}").encodeUtf8());
+  test("a verified event missing a required field is queued, not refused", func() {
+    // Reachable in production: a subscription-mode link or a 100%-off promo code
+    // produces a session with no payment_intent.
+    let deps = freshDeps();
+    let body = (
+      "{\"id\":\"evt_nopi\",\"type\":\"checkout.session.completed\",\"livemode\":true," #
+      "\"data\":{\"object\":{\"payment_intent\":null,\"client_reference_id\":null," #
+      "\"amount_total\":500,\"currency\":\"usd\",\"payment_status\":\"paid\"}}}"
+    ).encodeUtf8();
+    assert deliver(deps, body).status_code == 200;
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    switch (open[0].kind) {
+      case (#unprocessable({ eventId; field })) {
+        assert eventId == "evt_nopi";
+        assert field == "data.object.payment_intent";
+      };
+      case (_) Runtime.trap("expected #unprocessable");
+    };
+    // Stripe retries the same event; the obligation must not be duplicated.
+    assert deliver(deps, body).status_code == 200;
+    assert Orphans.unresolved(deps.orphanStore).size() == 1;
+  });
+
+  test("signed unhandled event type is acked 200, ignored, and audited", func() {
+    let deps = freshDeps();
+    let resp = deliver(deps, ("{\"id\":\"evt_x\",\"type\":\"invoice.paid\"}").encodeUtf8());
     assert resp.status_code == 200;
     assert bodyText(resp) == "ignored";
+    // An unsubscribed type arriving is a Stripe-config surprise, and this line is
+    // the only way an operator ever learns of it.
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.unhandledType") != null;
+  });
+
+  test("a dispute event is acked rather than refused", func() {
+    // charge.dispute.* is deliberately not subscribed (§11), but if a Dashboard
+    // config sends one it must not 400 its way toward disabling the endpoint.
+    let resp = deliver(
+      freshDeps(),
+      ("{\"id\":\"evt_d\",\"type\":\"charge.dispute.created\"}").encodeUtf8(),
+    );
+    assert resp.status_code == 200;
+  });
+});
+
+suite("a resent webhook is never a second payment", func() {
+  test("an intent already credited is a redelivery even with both dedup keys gone", func() {
+    // Automatic Stripe retries (~3 days) can never outlive the ~7-day dedup
+    // retention — but a manual "resend" from the Dashboard can, and resending an
+    // event to confirm it was processed is an ordinary operator move. With the
+    // keys pruned, attribution succeeds again and the old code reported a second
+    // payment for an already-delivered charge, inviting a refund of legitimate
+    // revenue. paidIntents is permanent and answers the real question.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert statusOf(deps) == #paid;
+
+    // Simulate the pruning by starting from a store with only paidIntents intact:
+    // a fresh dedup set is exactly what >7 days of pruning leaves behind.
+    let replayed : Card.Deps = { deps with dedup = Idempotency.emptyStore() };
+    let resp = deliver(replayed, paidBody("evt_1", "pi_1", ?goodRef, 500));
+    assert resp.status_code == 200;
+    assert bodyText(resp) == "already credited";
+    // No obligation invented, and nothing delivered twice.
+    assert Orphans.unresolved(replayed.orphanStore).size() == 0;
+    assert AuditLog.events(replayed.auditLog).find(
+      func(e) = e.tag == "stripe.replayedAfterPruning"
+    ) != null;
+  });
+
+  test("an intent credited to ANOTHER order never delivers again, and says so", func() {
+    // The asymmetry this closes: the check used to live inside the
+    // already-handled-order arm, so if the resolved order was still #created it
+    // never ran. Sequence: an operator attaches pi_1 to order Y (wrong order),
+    // then >7 days later resends the session naming order X, still #created.
+    // Both dedup sets are pruned, attribution succeeds, and without this check the
+    // payment is credited a SECOND time and the pi->order link is overwritten, so a
+    // later refund reconciles against the wrong order.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    // Simulate the wrong-order attach: the intent is credited to some other id.
+    deps.paidIntents.add("pi_1", "ffffffffffffffffffffffffffffffff");
+
+    let resp = deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500));
+    assert resp.status_code == 200;
+    // Nothing delivered: the money is already spent on another order.
+    assert statusOf(deps) == #created;
+    // The contradiction is recorded — previously this was completely silent.
+    assert AuditLog.events(deps.auditLog).find(
+      func(e) = e.tag == "stripe.creditedElsewhere"
+    ) != null;
+    // ⚠️ **The obligation lands in the ORPHAN list, not on an order.** The
+    // intent is credited to an id that is not in the store, so there is no order to
+    // attach a problem to — and dropping it would break §4.1's invariant that every
+    // verified dollar resolves to a delivery or to an obligation. Money that cannot
+    // be attached to an order is money held for nobody, which is what `#unattributed`
+    // means.
+    //
+    // This assertion is what caught the hole: moving problems onto orders introduced a
+    // way to lose one, because the queue's `add` filed regardless of whether the order
+    // existed and `Orders.fileProblem` cannot.
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    switch (open[0].kind) {
+      case (#unattributed({ claimedRef; paymentRef })) {
+        assert claimedRef == "ffffffffffffffffffffffffffffffff";
+        assert paymentRef == "pi_1";
+      };
+      case (_) Runtime.trap("expected the orphan fallback to file #unattributed");
+    };
+    // And it says why it went there rather than onto the order.
+    assert AuditLog.events(deps.auditLog).find(
+      func(e) = e.tag == "stripe.problemOrphaned"
+    ) != null;
+    // The link is NOT overwritten: whatever it pointed at still does.
+    assert deps.paidIntents.get("pi_1") == ?"ffffffffffffffffffffffffffffffff";
+  });
+
+  test("a genuinely different intent for a handled order IS still a duplicate", func() {
+    // The protection must not swallow real second payments — that is the whole
+    // reason #duplicate exists (§4.1: Stripe dedup ≠ double-pay protection).
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert deliver(deps, paidBody("evt_2", "pi_2", ?goodRef, 500)).status_code == 200;
+    // On the order now; no orderId to compare, the order supplies it.
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    let filed = switch (Orders.get(deps.orders, orderId)) {
+      case (?o) o.problems;
+      case null Runtime.trap("order vanished");
+    };
+    assert filed.size() == 1;
+    switch (filed[0].kind) {
+      case (#duplicate({ paymentRef })) assert paymentRef == "pi_2";
+      case (_) Runtime.trap("expected #duplicate");
+    };
+  });
+});
+
+suite("charge.refunded: partial vs full", func() {
+  test("isFullRefund is cumulative-vs-total, and a zero-total charge is never full", func() {
+    assert Card.isFullRefund({ eventId = "e"; paymentIntent = "p"; amountRefundedCents = 500; chargeAmountCents = 500 });
+    assert Card.isFullRefund({ eventId = "e"; paymentIntent = "p"; amountRefundedCents = 501; chargeAmountCents = 500 });
+    assert not Card.isFullRefund({ eventId = "e"; paymentIntent = "p"; amountRefundedCents = 499; chargeAmountCents = 500 });
+    assert not Card.isFullRefund({ eventId = "e"; paymentIntent = "p"; amountRefundedCents = 0; chargeAmountCents = 500 });
+    // A charge total of 0 would make any refund look complete.
+    assert not Card.isFullRefund({ eventId = "e"; paymentIntent = "p"; amountRefundedCents = 0; chargeAmountCents = 0 });
+  });
+
+  test("a PARTIAL refund leaves the obligation open", func() {
+    // The expensive bug this prevents: Stripe fires charge.refunded on ANY
+    // refund, so a small courtesy refund would otherwise auto-resolve the whole
+    // entry and the unrefunded remainder would have no record anywhere except
+    // the audit ring, which drops.
+    let deps = freshDeps();
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?"bogus_ref", 500)).status_code == 200;
+    assert Orphans.unresolved(deps.orphanStore).size() == 1;
+
+    assert deliver(deps, partialRefundBody("evt_2", "pi_1", 5, 500)).status_code == 200;
+    assert Orphans.unresolved(deps.orphanStore).size() == 1;
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.refundPartial") != null;
+    // ...and it does NOT also claim the refund matched nothing. Two audit lines
+    // contradicting each other is worse than either alone: an operator reading
+    // the trail cannot tell which is true.
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.refundUnmatched") == null;
+
+    // Completing the refund settles it.
+    assert deliver(deps, partialRefundBody("evt_3", "pi_1", 500, 500)).status_code == 200;
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+  });
+
+  test("a partial refund after delivery records the amount actually returned", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    // The real money-out path, and asserted rather than ignored — a skipped
+    // state is not a legal transition, and swallowing that would leave the order
+    // in #paid and silently test the wrong branch.
+    for (to in ([#delivered] : [Types.OrderStatus]).values()) {
+      switch (Orders.applyTransition(deps.orders, orderId, to, nowNs)) {
+        case (#ok(_)) {};
+        case (#err(_)) Runtime.trap("could not drive the order to #delivered");
+      };
+    };
+
+    assert deliver(deps, partialRefundBody("evt_2", "pi_1", 125, 500)).status_code == 200;
+    // ⚠️ **On the ORDER now.** No `orderId` to assert — the order it hangs off
+    // supplies that structurally, which is why the kind stopped carrying a copy.
+    let order1 = switch (Orders.get(deps.orders, orderId)) {
+      case (?o) o;
+      case null Runtime.trap("order vanished");
+    };
+    assert order1.problems.size() == 1;
+    switch (order1.problems[0].kind) {
+      case (#refundAfterDelivery({ refundedCents; fullRefund; cycles; paymentRef })) {
+        // A partial refund is a partial loss, and the operator reconciles by
+        // amount — so the amount has to be on the record, not just the fact.
+        assert refundedCents == 125;
+        assert not fullRefund;
+        assert cycles == lockedCycles;
+        assert paymentRef == "pi_1";
+      };
+      case (_) Runtime.trap("expected #refundAfterDelivery");
+    };
+
+    // ⚠️ **A SECOND partial refreshes the total rather than filing again**, which is
+    // the half that makes the dedup safe: `refundedCents` is cumulative, so freezing
+    // it at 125 would leave an operator reconciling against the wrong figure.
+    assert deliver(deps, partialRefundBody("evt_3", "pi_1", 300, 500)).status_code == 200;
+    let order2 = switch (Orders.get(deps.orders, orderId)) {
+      case (?o) o;
+      case null Runtime.trap("order vanished");
+    };
+    assert order2.problems.size() == 1;
+    switch (order2.problems[0].kind) {
+      case (#refundAfterDelivery({ refundedCents; fullRefund })) {
+        assert refundedCents == 300;
+        assert not fullRefund;
+      };
+      case (_) Runtime.trap("expected #refundAfterDelivery");
+    };
+    // And the full refund that follows flips the flag on the same problem.
+    assert deliver(deps, partialRefundBody("evt_4", "pi_1", 500, 500)).status_code == 200;
+    let order3 = switch (Orders.get(deps.orders, orderId)) {
+      case (?o) o;
+      case null Runtime.trap("order vanished");
+    };
+    assert order3.problems.size() == 1;
+    switch (order3.problems[0].kind) {
+      case (#refundAfterDelivery({ refundedCents; fullRefund })) {
+        assert refundedCents == 500;
+        assert fullRefund;
+      };
+      case (_) Runtime.trap("expected #refundAfterDelivery");
+    };
+  });
+});
+
+suite("handleWebhook: livemode gate", func() {
+  func depsExpecting(expected : ?Bool) : Card.Deps {
+    { freshDeps() with expectLivemode = expected };
+  };
+
+  test("a test-mode payment never delivers on a gateway declared live", func() {
+    // The scenario: an operator pastes a test-mode signing secret into a canister
+    // with a funded reserve. Without this check, test events spend real cycles on
+    // payments that never happened.
+    let deps = depsExpecting(?true);
+    withOrder(deps, #card);
+    let body = typedCheckoutBody(
+      "checkout.session.completed", "evt_1", "pi_1", ?goodRef, 500, "usd", "paid", false,
+    );
+    assert deliver(deps, body).status_code == 200;
+    assert statusOf(deps) == #created;
+    // No obligation: a test payment owes nobody anything.
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.livemodeMismatch") != null;
+  });
+
+  test("a LIVE payment on a test-declared gateway is an obligation, not a shrug", func() {
+    // The reverse mistake: real money arrived somewhere configured for test. It
+    // must not deliver, but it must land on the worklist — the money is real.
+    let deps = depsExpecting(?false);
+    withOrder(deps, #card);
+    let body = typedCheckoutBody(
+      "checkout.session.completed", "evt_1", "pi_1", ?goodRef, 500, "usd", "paid", true,
+    );
+    assert deliver(deps, body).status_code == 200;
+    assert statusOf(deps) == #created;
+    assert Orphans.unresolved(deps.orphanStore).size() == 1;
+  });
+
+  test("an UNSETTLED session raises no livemode obligation — no money has moved", func() {
+    // The bug this pins: the mismatch check used to run before the paid check, so
+    // an unpaid async session on a mode-mismatched gateway queued an entry
+    // claiming "LIVE payment arrived — money is in the live Stripe account" when
+    // nothing had settled and possibly never would. And if it later settled, the
+    // mismatch branch returned before intent dedup, so it queued a SECOND
+    // obligation for the same intent.
+    let deps = depsExpecting(?false);
+    withOrder(deps, #card);
+    let pending = typedCheckoutBody(
+      "checkout.session.completed", "evt_1", "pi_1", ?goodRef, 500, "usd", "unpaid", true,
+    );
+    assert deliver(deps, pending).status_code == 200;
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.unpaidSession") != null;
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.livemodeMismatch") == null;
+
+    // Settlement now raises exactly ONE obligation, not a second copy.
+    let settled = typedCheckoutBody(
+      "checkout.session.async_payment_succeeded", "evt_2", "pi_1", ?goodRef, 500, "usd", "paid", true,
+    );
+    assert deliver(deps, settled).status_code == 200;
+    assert Orphans.unresolved(deps.orphanStore).size() == 1;
+  });
+
+  test("a live-on-test obligation keeps the real reference, not a placeholder", func() {
+    // The reference is the only field identifying WHICH order to rescue once the
+    // configuration is fixed; discarding it turns a recoverable misconfiguration
+    // into a manual hunt through the Stripe Dashboard.
+    let deps = depsExpecting(?false);
+    withOrder(deps, #card);
+    let body = typedCheckoutBody(
+      "checkout.session.completed", "evt_1", "pi_1", ?goodRef, 500, "usd", "paid", true,
+    );
+    assert deliver(deps, body).status_code == 200;
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    switch (open[0].kind) {
+      case (#unattributed({ claimedRef; paymentRef })) {
+        assert claimedRef == goodRef;
+        assert paymentRef == "pi_1";
+      };
+      case (_) Runtime.trap("expected #unattributed");
+    };
+  });
+
+  test("an unset expectation is audited on every honoured payment", func() {
+    // A gateway taking payments without a declared mode has no defence against a
+    // test-mode secret spending the reserve. The nudge stops once it is declared.
+    let deps = depsExpecting(null);
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert statusOf(deps) == #paid;
+    assert AuditLog.events(deps.auditLog).find(func(e) = e.tag == "stripe.livemodeUnset") != null;
+
+    // Declared: no nudge.
+    let declared = depsExpecting(?true);
+    withOrder(declared, #card);
+    assert deliver(declared, paidBody("evt_2", "pi_2", ?goodRef, 500)).status_code == 200;
+    assert AuditLog.events(declared.auditLog).find(func(e) = e.tag == "stripe.livemodeUnset") == null;
+  });
+
+  test("matching modes deliver normally, and an unset expectation accepts either", func() {
+    let live = depsExpecting(?true);
+    withOrder(live, #card);
+    assert deliver(live, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert statusOf(live) == #paid;
+
+    let unset = depsExpecting(null);
+    withOrder(unset, #card);
+    let testEvent = typedCheckoutBody(
+      "checkout.session.completed", "evt_2", "pi_2", ?goodRef, 500, "usd", "paid", false,
+    );
+    assert deliver(unset, testEvent).status_code == 200;
+    assert statusOf(unset) == #paid;
   });
 });
 
@@ -229,7 +646,7 @@ suite("handleWebhook: checkout happy path + dedup (§4.2)", func() {
       };
       case (null) assert false;
     };
-    assert ErrorQueue.size(deps.errorQueue) == 0;
+    assert Orphans.size(deps.orphanStore) == 0;
   });
 
   test("redelivered event.id is acked and dropped", func() {
@@ -239,7 +656,7 @@ suite("handleWebhook: checkout happy path + dedup (§4.2)", func() {
     let resp = deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500));
     assert resp.status_code == 200;
     assert bodyText(resp) == "duplicate event";
-    assert ErrorQueue.size(deps.errorQueue) == 0; // a redelivery is not a double-pay
+    assert Orphans.size(deps.orphanStore) == 0; // a redelivery is not a double-pay
   });
 
   test("same payment_intent under a fresh event.id is acked and dropped", func() {
@@ -249,51 +666,104 @@ suite("handleWebhook: checkout happy path + dedup (§4.2)", func() {
     let resp = deliver(deps, paidBody("evt_2", "pi_1", ?goodRef, 500));
     assert resp.status_code == 200;
     assert bodyText(resp) == "duplicate payment intent";
-    assert ErrorQueue.size(deps.errorQueue) == 0;
+    assert Orphans.size(deps.orphanStore) == 0;
   });
 
-  test("genuine second payment (fresh event + intent) is Type 1 #duplicate", func() {
+  test("genuine second payment (fresh event + intent) is a #duplicate obligation", func() {
     let deps = freshDeps();
     withOrder(deps, #card);
     assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
     let resp = deliver(deps, paidBody("evt_2", "pi_2", ?goodRef, 500));
     assert resp.status_code == 200;
     assert bodyText(resp) == "queued for operator review";
-    let queued = ErrorQueue.unresolved(deps.errorQueue);
+    // On the order; the queue holds only order-less money now.
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    let queued = switch (Orders.get(deps.orders, orderId)) {
+      case (?o) o.problems;
+      case null Runtime.trap("order vanished");
+    };
     assert queued.size() == 1;
-    assert queued[0].kind == #duplicate({ orderId; paymentRef = "pi_2" });
+    assert queued[0].kind == #duplicate({ paymentRef = "pi_2" });
     assert statusOf(deps) == #paid; // first payment's delivery is untouched
   });
 
-  test("late payment on an expired order is honored (§4)", func() {
-    let deps = freshDeps();
-    withOrder(deps, #card);
-    switch (Orders.applyTransition(deps.orders, orderId, #expired, 200)) {
-      case (#ok(_)) {};
-      case (#err(_)) assert false;
+  test("a payment for an unpayable order is a refundable obligation, never a trap", func() {
+    // ⚠️ THE REGRESSION THIS PINS is a reachable `Runtime.trap` on the money-in
+    // path. `markPaid`'s error arm traps, on the documented grounds that the
+    // status guard above it already checked the status. The matrix has no
+    // `#expired → #paid` edge, so a guard that admitted `#expired` would trap on every
+    // such payment — and a trap here is a 5xx that Stripe retries for about three days.
+    //
+    // `-Werror` cannot see that coupling: both arms typecheck whatever the matrix
+    // says. This test is the coupling.
+    //
+    // This test previously asserted the opposite ("late payment on an expired
+    // order is honored"), which was the §4 contract until `attach_payment` and
+    // the `#expired → #paid` edge were deleted together.
+    for (unpayable in ([#cancelled, #expired] : [Types.OrderStatus]).values()) {
+      let deps = freshDeps();
+      withOrder(deps, #card);
+      switch (Orders.applyTransition(deps.orders, orderId, unpayable, 200)) {
+        case (#ok(_)) {};
+        case (#err(_)) assert false;
+      };
+      // 200, not 5xx: Stripe must stop retrying. The money is real and the
+      // obligation is recorded for the operator.
+      assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+      // The status does NOT move.
+      assert statusOf(deps) == unpayable;
+      // Filed as #unattributed, not #duplicate: nothing was ever paid, so there
+      // is no first payment for this to be a second of. It carries the
+      // paymentRef a `charge.refunded` resolves.
+      let open = Orphans.unresolved(deps.orphanStore);
+      assert open.size() == 1;
+      switch (open[0].kind) {
+        case (#unattributed({ paymentRef; claimedRef = _ })) assert paymentRef == "pi_1";
+        case (_) Runtime.trap("expected #unattributed for a " # Types.statusToText(unpayable) # " order");
+      };
     };
-    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
-    assert statusOf(deps) == #paid;
   });
 
-  test("non-paid payment_status is acked without consuming the intent", func() {
+  test("an unsettled async payment delivers when Stripe reports it succeeded", func() {
+    // The real sequence for a delayed payment method. `completed` arrives with
+    // payment_status != paid and money has NOT moved; settlement is reported
+    // later as `checkout.session.async_payment_succeeded`, carrying the same
+    // session object. Handling only `completed` would mean fiat arriving with
+    // nothing delivered and nothing on the worklist.
     let deps = freshDeps();
     withOrder(deps, #card);
     let resp = deliver(deps, checkoutBody("evt_1", "pi_1", ?goodRef, 500, "usd", "unpaid"));
     assert resp.status_code == 200;
     assert statusOf(deps) == #created;
-    // the later genuinely-paid delivery for the same intent still mints
-    assert deliver(deps, paidBody("evt_2", "pi_1", ?goodRef, 500)).status_code == 200;
+    let settled = typedCheckoutBody(
+      "checkout.session.async_payment_succeeded", "evt_2", "pi_1", ?goodRef, 500, "usd", "paid", true,
+    );
+    assert deliver(deps, settled).status_code == 200;
+    assert statusOf(deps) == #paid;
+  });
+
+  test("an async payment that fails for good is acked and leaves the order payable", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, checkoutBody("evt_1", "pi_1", ?goodRef, 500, "usd", "unpaid")).status_code == 200;
+    let failed = (
+      "{\"id\":\"evt_2\",\"type\":\"checkout.session.async_payment_failed\",\"livemode\":true," #
+      "\"data\":{\"object\":{\"payment_intent\":\"pi_1\"}}}"
+    ).encodeUtf8();
+    assert deliver(deps, failed).status_code == 200;
+    assert statusOf(deps) == #created;
+    // The intent was never credited, so a genuine later payment still works.
+    assert deliver(deps, paidBody("evt_3", "pi_1", ?goodRef, 500)).status_code == 200;
     assert statusOf(deps) == #paid;
   });
 });
 
-suite("handleWebhook: attribution failures are Type 1 #unattributed (§4.1)", func() {
+suite("handleWebhook: attribution failures are #unattributed (§4.1)", func() {
   func expectUnattributed(deps : Card.Deps, body : Blob, claimedRef : Text, paymentRef : Text) {
     let resp = deliver(deps, body);
     assert resp.status_code == 200;
     assert bodyText(resp) == "queued for operator review";
-    let queued = ErrorQueue.unresolved(deps.errorQueue);
+    let queued = Orphans.unresolved(deps.orphanStore);
     assert queued.size() == 1;
     assert queued[0].kind == #unattributed({ claimedRef; paymentRef });
   };
@@ -319,13 +789,6 @@ suite("handleWebhook: attribution failures are Type 1 #unattributed (§4.1)", fu
     assert statusOf(deps) == #created;
   });
 
-  test("reference to a non-card order", func() {
-    let deps = freshDeps();
-    withOrder(deps, #ckUsdc);
-    expectUnattributed(deps, paidBody("evt_1", "pi_1", ?goodRef, 500), goodRef, "pi_1");
-    assert statusOf(deps) == #created;
-  });
-
   test("unexpected currency", func() {
     let deps = freshDeps();
     withOrder(deps, #card);
@@ -333,49 +796,93 @@ suite("handleWebhook: attribution failures are Type 1 #unattributed (§4.1)", fu
     assert statusOf(deps) == #created;
   });
 
-  test("paid amount below the order's fee floor", func() {
-    let deps = freshDeps();
-    withOrder(deps, #card);
-    // 31¢: fee = ⌈31·290/10_000⌉ + 30 = 31 ≥ 31 → no net amount
-    expectUnattributed(deps, paidBody("evt_1", "pi_1", ?goodRef, 31), goodRef, "pi_1");
-    assert statusOf(deps) == #created;
+  test("a paid amount that is not the quoted one, at any size", func() {
+    // One outcome, one message: "not the amount we asked for". 31¢ and 1000¢ against a
+    // 500¢ order are the SAME case, and neither marks the order paid.
+    for (cents in ([31, 499, 501, 1_000] : [Nat]).values()) {
+      let deps = freshDeps();
+      withOrder(deps, #card);
+      expectUnattributed(deps, paidBody("evt_1", "pi_1", ?goodRef, cents), goodRef, "pi_1");
+      assert statusOf(deps) == #created;
+    };
   });
 });
 
-suite("handleWebhook: actual paid amount is honored (§3/§6.1)", func() {
-  test("mismatched amount is repriced from the creation pricing snapshot", func() {
+suite("handleWebhook: the paid amount must EQUAL the quote (§3/§6.1)", func() {
+  // A per-order session carries our own figure, so a difference means a Stripe
+  // feature that moves the total is enabled — an operator problem, not a buyer's
+  // choice. The list of such features is next to `Session.createBody`.
+
+  test("the quoted amount delivers exactly what was locked at creation", func() {
     let deps = freshDeps();
     withOrder(deps, #card);
-    // 1000¢ ≠ the 500¢ tier: fee = ⌈1000·290/10_000⌉ + 30 = 59, net 941¢
-    // @ 737_000 micros → 941 · 7_370_000_000 cycles.
-    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 1_000)).status_code == 200;
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
     switch (Orders.get(deps.orders, orderId)) {
       case (?order) {
         assert order.status == #paid;
-        assert order.lockedCycles == 6_935_170_000_000;
+        assert order.lockedCycles == lockedCycles; // untouched by money-in
+        assert order.paidUsdCents == ?500;
       };
       case (null) assert false;
     };
-    // the mismatch is on the audit trail
-    var seen = false;
-    for (event in AuditLog.events(deps.auditLog).values()) {
-      if (event.tag == "stripe.amountMismatch") seen := true;
+  });
+
+  test("a different amount delivers NOTHING and files an obligation", func() {
+    // 1000¢ against the 500¢ order. It must leave the order payable and the money
+    // queued for a refund — never deliver a quantity nobody quoted.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 1_000)).status_code == 200;
+    switch (Orders.get(deps.orders, orderId)) {
+      case (?order) {
+        assert order.status == #created;
+        assert order.lockedCycles == lockedCycles;
+        assert order.paidUsdCents == null;
+      };
+      case (null) assert false;
     };
-    assert seen;
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    // The detail names both figures, because the operator's next step is to find
+    // which session setting produced the difference.
+    assert open[0].detail.contains(#text "1000");
+    assert open[0].detail.contains(#text "500");
+  });
+
+  test("no order is ever paid at a quantity other than its locked one", func() {
+    // The property behind the two tests above, stated once: whatever amount
+    // arrives, an order that reaches #paid carries the quantity it was created
+    // with. This is what makes the promise tally exact.
+    for (cents in ([1, 31, 499, 500, 501, 1_000] : [Nat]).values()) {
+      let deps = freshDeps();
+      withOrder(deps, #card);
+      assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, cents)).status_code == 200;
+      switch (Orders.get(deps.orders, orderId)) {
+        case (?order) {
+          if (order.status == #paid) {
+            assert cents == 500;
+            assert order.lockedCycles == lockedCycles;
+          } else {
+            assert order.status == #created;
+          };
+        };
+        case (null) assert false;
+      };
+    };
   });
 });
 
 suite("handleWebhook: charge.refunded auto-resolve (§4.1)", func() {
-  test("refund resolves every unresolved Type 1 entry for its intent", func() {
+  test("refund resolves every unresolved refund-resolvable entry for its intent", func() {
     let deps = freshDeps();
     // two unattributed payments under the same intent... impossible (intent
     // dedup), so: one unattributed payment, refunded.
     assert deliver(deps, paidBody("evt_1", "pi_1", null, 500)).status_code == 200;
-    assert ErrorQueue.unresolved(deps.errorQueue).size() == 1;
+    assert Orphans.unresolved(deps.orphanStore).size() == 1;
     let resp = deliver(deps, refundBody("evt_2", "pi_1"));
     assert resp.status_code == 200;
-    assert ErrorQueue.unresolved(deps.errorQueue).size() == 0;
-    assert ErrorQueue.size(deps.errorQueue) == 1; // resolved, retained
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    assert Orphans.size(deps.orphanStore) == 1; // resolved, retained
   });
 
   test("redelivered refund event is deduped", func() {
@@ -389,5 +896,272 @@ suite("handleWebhook: charge.refunded auto-resolve (§4.1)", func() {
     let resp = deliver(freshDeps(), refundBody("evt_1", "pi_unknown"));
     assert resp.status_code == 200;
     assert bodyText(resp) == "ok";
+  });
+
+  test("an unmatched refund is audited rather than passing silently", func() {
+    let deps = freshDeps();
+    assert deliver(deps, refundBody("evt_1", "pi_unknown")).status_code == 200;
+    assert AuditLog.events(deps.auditLog).find(
+      func(e) = e.tag == "stripe.refundUnmatched"
+    ) != null;
+  });
+
+  test("a paid payment is indexed so a later refund can find its order", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert deps.paidIntents.get("pi_1") == ?orderId;
+  });
+
+  test("refund of a DELIVERED order queues #refundAfterDelivery", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    // Drive the order to its terminal delivered state the way money-out does.
+    for (to in ([#delivered] : [Types.OrderStatus]).values()) {
+      switch (Orders.applyTransition(deps.orders, orderId, to, nowNs)) {
+        case (#ok(_)) {};
+        case (#err(_)) Runtime.trap("could not drive the order to #delivered");
+      };
+    };
+
+    assert deliver(deps, refundBody("evt_2", "pi_1")).status_code == 200;
+
+    // On the order now; the queue keeps only order-less money.
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    let filed = switch (Orders.get(deps.orders, orderId)) {
+      case (?o) o.problems;
+      case null Runtime.trap("order vanished");
+    };
+    assert filed.size() == 1;
+    switch (filed[0].kind) {
+      case (#refundAfterDelivery({ paymentRef; cycles })) {
+        assert paymentRef == "pi_1";
+        assert cycles == lockedCycles;
+      };
+      case (_) Runtime.trap("expected #refundAfterDelivery");
+    };
+    assert AuditLog.events(deps.auditLog).find(
+      func(e) = e.tag == "stripe.refundAfterDelivery"
+    ) != null;
+  });
+
+  test("#refundAfterDelivery is never auto-resolved by the refund that made it", func() {
+    // The refund is what created the problem, so resolving on its paymentRef would
+    // close the loss the instant it was recorded. Only a human closes it.
+    assert Problems.paymentRefOf(#refundAfterDelivery({
+      paymentRef = "pi_1"; cycles = lockedCycles;
+      refundedCents = 500; fullRefund = true;
+    })) == null;
+    assert not Problems.refundResolvable(#refundAfterDelivery({
+      paymentRef = "pi_1"; cycles = lockedCycles;
+      refundedCents = 500; fullRefund = true;
+    }));
+  });
+
+  test("refund of a paid-but-undelivered order is audited, not queued as a loss", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert deliver(deps, refundBody("evt_2", "pi_1")).status_code == 200;
+    // Money-out may still be mid-flight — a race for the operator to look at,
+    // not a settled loss.
+    assert Orphans.unresolved(deps.orphanStore).size() == 0;
+    assert AuditLog.events(deps.auditLog).find(
+      func(e) = e.tag == "stripe.refundBeforeDelivery"
+    ) != null;
+  });
+});
+
+suite("handleWebhook: the purchase ceiling", func() {
+  test("an unknown reference is the generic unattributed case", func() {
+    let deps = freshDeps();
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    assert open[0].detail.contains(#text "no order");
+  });
+
+  test("a payment above the ceiling delivers nothing — an obligation instead", func() {
+    let deps = { freshDeps() with maxPurchaseUsdCents = 1_000 };
+    withOrder(deps, #card);
+    // Defence in depth: the amount check alone would already refuse 5000¢ against a
+    // 500¢ order. The ceiling is what catches the case the equality cannot — an order
+    // created under a higher ceiling, matching its OWN quote, after the ceiling is
+    // lowered.
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 5_000)).status_code == 200;
+    assert statusOf(deps) == #created; // never marked paid
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    assert open[0].detail.contains(#text "exceeds the per-purchase ceiling");
+  });
+
+  test("the ceiling's one REACHABLE case: lowered under an existing order", func() {
+    // The paid amount must equal the quote, so a "tampered price" cannot reach the
+    // ceiling — this is the only path to it, and it needs no tampering at all. The order quotes 500¢ and is paid 500¢; the
+    // ceiling moved to 100¢ underneath it. Without this branch the equality
+    // check would pass and the order would deliver above a limit the operator has
+    // since set. (Delete this test and `#aboveCeiling` becomes dead code.)
+    let deps = { freshDeps() with maxPurchaseUsdCents = 100 };
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert statusOf(deps) == #created;
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    assert open[0].detail.contains(#text "exceeds the per-purchase ceiling");
+  });
+
+  test("a payment exactly at the ceiling is honored", func() {
+    let deps = { freshDeps() with maxPurchaseUsdCents = 500 };
+    withOrder(deps, #card);
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?goodRef, 500)).status_code == 200;
+    assert statusOf(deps) == #paid;
+  });
+
+  test("an over-long claimed reference is truncated before it is stored", func() {
+    let deps = freshDeps();
+    var long = "";
+    for (_ in Nat.range(0, 40)) long #= "0123456789";
+    assert deliver(deps, paidBody("evt_1", "pi_1", ?long, 500)).status_code == 200;
+    let open = Orphans.unresolved(deps.orphanStore);
+    assert open.size() == 1;
+    switch (open[0].kind) {
+      case (#unattributed({ claimedRef; paymentRef = _ })) {
+        assert claimedRef.size() < long.size();
+        assert claimedRef.contains(#text "truncated");
+      };
+      case (_) Runtime.trap("expected #unattributed");
+    };
+  });
+});
+
+
+suite("handleWebhook: only a real payment creates money-out work", func() {
+  // The webhook route is unauthenticated by necessity, so whatever it triggers
+  // is free for anyone to invoke. `paidOrder` is what the caller gates the delivery
+  // kick on, and it must be null on every path except an actual #paid.
+  test("a verified payment reports the order it paid", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    let outcome = deliverFull(deps, paidBody("evt_1", "pi_1", ?goodRef, 500));
+    assert outcome.response.status_code == 200;
+    assert outcome.paidOrder == ?orderId;
+  });
+
+  test("no other path reports one", func() {
+    // Each of these is a distinct exit from handleWebhook.
+    let cases : [(Text, Card.Deps -> Card.Outcome)] = [
+      ("unparseable body", func(deps) = deliverFull(deps, "{ not json".encodeUtf8())),
+      ("unhandled event type", func(deps) = deliverFull(deps, ("{\"id\":\"e\",\"type\":\"invoice.paid\",\"data\":{\"object\":{}}}").encodeUtf8())),
+      ("missing reference", func(deps) = deliverFull(deps, paidBody("evt_1", "pi_1", null, 500))),
+      ("unknown order", func(deps) = deliverFull(deps, paidBody("evt_1", "pi_1", ?goodRef, 500))),
+      ("payment not completed", func(deps) = deliverFull(deps, checkoutBody("evt_1", "pi_1", ?goodRef, 500, "usd", "unpaid"))),
+      ("refund", func(deps) = deliverFull(deps, refundBody("evt_1", "pi_1"))),
+    ];
+    for ((name, run) in cases.values()) {
+      let outcome = run(freshDeps());
+      if (outcome.paidOrder != null) Runtime.trap("path reported a paid order: " # name);
+    };
+  });
+
+  test("an unsigned request reports none and touches nothing", func() {
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    let unsigned : Http.Request = {
+      method = "POST";
+      url = "/webhook/stripe";
+      headers = [];
+      body = paidBody("evt_1", "pi_1", ?goodRef, 500);
+    };
+    let outcome = Card.handleWebhook(deps, ?secret, unsigned, nowNs, Card.defaultToleranceSeconds);
+    assert outcome.response.status_code == 400;
+    assert outcome.paidOrder == null;
+    assert statusOf(deps) == #created;
+  });
+
+  test("an unprovisioned secret reports none", func() {
+    let outcome = Card.handleWebhook(freshDeps(), null, signedReq(paidBody("e", "p", null, 500)), nowNs, Card.defaultToleranceSeconds);
+    assert outcome.response.status_code == 503;
+    assert outcome.paidOrder == null;
+  });
+});
+
+suite("a buyer's cancel is not a system expiry, THROUGH the webhook", func() {
+  test("the expired event records #cancelled when the owner asked to cancel", func() {
+    // ⚠️ **This is the path the previous two fixes missed.** `cancel_order` expires the
+    // session at Stripe, Stripe fires `checkout.session.expired`, and THIS handler
+    // settles the order before the cancel is recorded. The first attempt guarded the
+    // recovery sweep from a transient set this module cannot see; the second routed the
+    // sweep and the admin expire through the attribution and left this call going
+    // straight to `expireBySession`. Both passed their tests, because neither test
+    // drove the webhook.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    deps.cancelRequests.add(orderId);
+
+    let resp = deliver(deps, expiredBody("evt_x", ?goodRef));
+    assert resp.status_code == 200;
+
+    let ?settled = Orders.get(deps.orders, orderId) else Runtime.trap("order vanished");
+    assert settled.status == #cancelled;
+    // Nothing expired, so no cause — that is the provenance `expiredBy` carries.
+    assert settled.expiredBy == null;
+    // The honoured intent is pruned.
+    assert not deps.cancelRequests.contains(orderId);
+  });
+
+  test("the PAYMENT winning drops the intent, because nothing can honour it", func() {
+    // The third and last exit from `#created`, and the one that leaked: `cancel_order`
+    // records the intent, Stripe answers the expire 400 *because* this session
+    // completed, and the cancel returns without removing it. `#cancelled` is
+    // unreachable from `#paid`, so the entry could never be honoured and would sit in
+    // stable memory for the life of the canister.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    deps.cancelRequests.add(orderId);
+
+    assert deliver(deps, paidBody("evt_paid_cancel", "pi_paid_cancel", ?goodRef, 500)).status_code == 200;
+
+    let ?settled = Orders.get(deps.orders, orderId) else Runtime.trap("order vanished");
+    // The payment is what happened, and the intent did not change that.
+    assert settled.status == #paid;
+    assert not deps.cancelRequests.contains(orderId);
+  });
+
+  test("a REFUSED payment leaves the intent alone, so the expiry can still honour it", func() {
+    // The other half: only a payment that actually took the order removes the intent.
+    // An amount that does not match the quote is refused as `#unattributed`, the order
+    // stays `#created`, and the buyer's cancel is still live — so a handler that pruned
+    // on every completed event would lose the attribution for the one case where the
+    // order remains cancellable.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+    deps.cancelRequests.add(orderId);
+
+    assert deliver(deps, paidBody("evt_wrong_amount", "pi_wrong_amount", ?goodRef, 499)).status_code == 200;
+
+    let ?stayed = Orders.get(deps.orders, orderId) else Runtime.trap("order vanished");
+    assert stayed.status == #created;
+    assert deps.cancelRequests.contains(orderId);
+
+    // And the expiry that follows still records the buyer's own decision.
+    assert deliver(deps, expiredBody("evt_after_refusal", ?goodRef)).status_code == 200;
+    let ?settled = Orders.get(deps.orders, orderId) else Runtime.trap("order vanished");
+    assert settled.status == #cancelled;
+    assert not deps.cancelRequests.contains(orderId);
+  });
+
+  test("and with no request it is still a real expiry, with its cause", func() {
+    // The other half. Without it, the assertion above is satisfied by a handler that
+    // cancels every expired session, which would record every abandoned checkout as
+    // the buyer's own decision.
+    let deps = freshDeps();
+    withOrder(deps, #card);
+
+    assert deliver(deps, expiredBody("evt_y", ?goodRef)).status_code == 200;
+
+    let ?settled = Orders.get(deps.orders, orderId) else Runtime.trap("order vanished");
+    assert settled.status == #expired;
+    assert settled.expiredBy == ?(#sessionExpired : Types.ExpiredBy);
   });
 });

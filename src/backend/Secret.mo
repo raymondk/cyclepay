@@ -1,33 +1,36 @@
-/// Stripe webhook signing secret — the system's only stored secret (§7).
+/// A stored Stripe secret (§7). **Two stores use this module**: the webhook signing
+/// secret and the Checkout Sessions API key.
 ///
-/// Stored **plaintext in canister state, by design** (no vetKeys). HMAC is
-/// symmetric, so "verify" = "forge": whoever reads this blob can mint
-/// "paid" webhooks. The documented posture (§7) is:
+/// They share the rail's on/off switch: "live" means **both provisioned**, because
+/// neither state can complete a purchase — no API key means no payable session, no
+/// webhook secret means a buyer can pay and we cannot credit them.
 ///
-/// - **Confidentiality layer: SEV-SNP**, i.e. hardware + attestation, not
-///   cryptography in the canister — and only if the target subnet's
-///   *checkpoints and state-sync* are confidential too (memory encryption
-///   alone does not cover state at rest; verify this hardest, §7).
-/// - **Provisioning exposure:** the set/rotate call's argument transits the
-///   TLS-terminating boundary node as a plain ingress message.
-/// - **Blast-radius backstop (always on):** a leaked secret only lets an
-///   attacker mint cycles at operator expense; the per-period ICP burn cap
-///   (§5.3, task 10) bounds the drain, off-chain reconciliation detects it,
-///   and rotation recovers. Launch must not block on SEV availability.
+/// ⚠️ **Stored plaintext in canister state, by design.** HMAC is symmetric, so
+/// *verify = forge*: whoever reads the webhook blob can forge "paid" events, and
+/// encrypting it would only move the problem to the key that decrypts it. The posture —
+/// SEV-SNP as the confidentiality layer, the reserve balance as the always-on blast
+/// radius, why a stock beats a per-period cap and the one way it does not — is
+/// `docs/DESIGN.md` §7, with the confidential-subnet checklist in RUNBOOK.
 ///
-/// Rotation needs no dual-secret window on this side: while a rolled Stripe
-/// secret's predecessor is live, Stripe sends one `v1=` per active secret
-/// and Card.verify accepts any single match — so swapping the stored blob
-/// at any point during the overlap never drops a delivery.
+/// ⚠️ **What a leak of each one buys an attacker differs, and that is why the key's SCOPE
+/// matters more than its storage.** The webhook secret spends the reserve. A restricted
+/// key scoped to Checkout Sessions = Write can only create sessions that pay **us**, and
+/// read them back — which the recovery sweep needs. An unrestricted key, able to refund,
+/// would be materially worse to leak.
 import Blob "mo:core/Blob";
 import Result "mo:core/Result";
 
 module {
 
-  /// Reject obviously truncated provisioning. Real Stripe secrets are
-  /// `whsec_` + ≥32 chars (the whole string, prefix included, is the HMAC
-  /// key); a fat-fingered short paste should fail loudly at set time, not
-  /// silently 401 every webhook.
+  /// Reject obviously truncated provisioning: a fat-fingered short paste should
+  /// fail loudly at set time, not silently reject every webhook.
+  ///
+  /// 16, deliberately **below** the length of a real Stripe secret (`whsec_` plus
+  /// ~32 chars — the whole string, prefix included, is the HMAC key). The floor
+  /// only has to catch a truncated paste; keeping it under Stripe's real length
+  /// leaves shorter test secrets usable on a local network, where nothing is being
+  /// protected. It is not a strength check, and no length here makes a leaked
+  /// secret safe — see §2 of the RUNBOOK for rotation.
   public let minSecretBytes : Nat = 16;
 
   public type Store = {

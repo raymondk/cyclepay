@@ -1,125 +1,124 @@
 # CyclePay — Fully On-Chain Cycles Gateway
 
-A "buy cycles with fiat or stablecoins" service that runs entirely on the
-Internet Computer: a single verifiable Motoko backend canister plus an asset
-canister serving the frontend. Two payment rails — **Card** (Stripe webhook,
-inbound only, no `sk_live` ever leaves the user's browser flow) and
-**ck-USDC** (ICRC-2 approve → pull) — converge on a unified mint through the
-Cycles Minting Canister from an operator ICP float. Purchases are
-Internet-Identity-authenticated, one-shot, and delivered either to a canister
-(`notify_top_up`) or a cycles-ledger account (`notify_mint_cycles`).
+**Buy cycles with a credit card.** No ICP, no wallet, no exchange account — which is the
+whole point: it gets a developer from "I have a card" to "my canister has cycles" without
+first solving crypto onboarding.
 
-The design bar is "production money-handler from day one": full idempotency,
-write-intent-before-call replay safety, a bounded error queue with defined
-money positions for every failure, and a reproducible build so anyone can
-verify the deployed module hash against a tagged commit.
+It runs entirely on the Internet Computer — one Motoko backend canister and one
+certified-assets frontend canister, **no server**. It sells cycles from a reserve it
+already holds, prices them from two on-chain rates with **no outbound HTTPS in the pricing
+path**, and shows the buyer the cycle quantity before they commit.
 
-Key documents:
+Everything money-touching **fails closed**: a freshly deployed gateway accepts no orders
+and delivers nothing until each lever is consciously set.
 
-| Document | What it is |
-|----------|------------|
-| `design-docs/ONCHAIN_GATEWAY_SPEC.md` | The decision record (spec v2.1) — canonical source for all design decisions |
-| [GitHub Issues](https://github.com/raymondk/cyclepay/issues) | Task and progress tracking (source of truth; `PRD.md` and `progress.txt` are frozen historical artifacts) |
-| `RUNBOOK.md` | Operations: go-live checklist, secret rotation, error-queue triage |
-| `RELEASE.md` | Reproducible build and module-hash verification procedure |
+## It is running
 
-## Prerequisites
+**<https://cyclepay.raymondk.co>** — or <https://shy4u-4qaaa-aaaay-aadhq-cai.icp.net>,
+which is the same app on the canister's own gateway origin. Internet Identity derives
+principals from the **frontend canister id**, so both addresses give you the same
+account and the same cycles.
 
-- Node.js ≥ 22
-- `mops` — `npm i -g ic-mops` (the Motoko compiler version is pinned in
-  `mops.toml [toolchain]`; mops resolves it automatically)
-- `icp` CLI — `npm i -g @icp-sdk/icp-cli @icp-sdk/ic-wasm`
+⚠️ **Simulation mode, and you cannot buy on it.** Cards are charged in Stripe's
+sandbox, and cycles are divided by `pricing_status().config.divisor` — so a purchase
+quotes *and* delivers that fraction of what a live gateway would for the same charge.
+Read the divisor rather than trusting a number written here.
 
-This project uses **`icp-cli`, never `dfx`**. Project configuration lives in
-`icp.yaml`; Motoko dependencies in `mops.toml` / `mops.lock`.
+Purchases also require the buyer's principal to be **allow-listed by a controller**:
+without that, free sandbox payments against a funded reserve would be a faucet, so an
+unlisted principal is refused with `buyerNotAllowed`.
 
-## Local development
+What anyone can do on it, with no identity at all: browse, read a **live quote** for any
+amount, and check every operational number the gateway publishes.
 
-One-time setup:
-
-```sh
-mops install                 # Motoko dependencies (pinned by mops.lock)
+```bash
+icp canister call backend quote_previews '(vec { 1_000 : nat })' -e ic  # $10, with both rate inputs
+icp canister call backend reserve_status  '()' -e ic
+icp canister call backend pricing_status  '()' -e ic
+icp canister call backend lifecycle_config '()' -e ic
+icp canister call backend card_tiers      '()' -e ic
 ```
 
-Backend iteration loop:
+Canister ids are in `.icp/data/mappings/ic.ids.json`; the backend is
+`saz2a-riaaa-aaaay-aadha-cai`.
+
+This repository began as a fork of [`raymondk/cyclepay`](https://github.com/raymondk/cyclepay),
+which explored the design with an agent loop; it is the source of truth now, and the
+architecture it ships is not the one the fork point described.
+
+## How it works, and how to run it
+
+**[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the diagram** — the money path end to end, where the trust
+boundaries sit, and which of the two cycle pots a delivery spends from. Start there.
+
+| you want to | go to |
+|---|---|
+| understand the system | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), then [`docs/DESIGN.md`](docs/DESIGN.md) for *why* |
+| run it locally | [`docs/OPERATE.md`, Mode 1](docs/OPERATE.md#mode-1--local) |
+| deploy it | [Mode 2 — mainnet simulation](docs/OPERATE.md#mode-2--mainnet-simulation) or [Mode 3 — production](docs/OPERATE.md#mode-3--mainnet-production) |
+| operate one that is misbehaving | [`RUNBOOK.md`](RUNBOOK.md#enter-here-what-you-are-looking-at) — entered by symptom |
+| check the claims yourself | [`docs/VERIFY.md`](docs/VERIFY.md#what-anyone-can-check-right-now) |
 
 ```sh
-mops check                   # typecheck (includes unit tests)
-mops build                   # compile to src/backend/dist/
-mops test                    # run the Motoko unit suites
+git clone --recurse-submodules https://github.com/marc0olo/cyclepay
+icp network start -d && icp deploy && scripts/local-dev-seed.sh
 ```
 
-Running the whole app locally:
+⚠️ **The submodule and the seed are both load-bearing**, and neither failure looks like
+its cause — [`docs/OPERATE.md`, Mode 1](docs/OPERATE.md#mode-1--local) explains both
+before the first command.
 
-```sh
-icp network start -d         # project-local replica; the OS picks a free port
-icp deploy                   # build + deploy backend and frontend canisters
-icp network status --json    # gateway URL (the port changes every start — never hardcode it)
-icp network stop             # when done
-```
+## Verify it yourself
 
-The local network is configured with `gateway.port: 0` so parallel
-worktrees/projects never collide — always read the URL from
-`icp network status --json`.
+`docs/VERIFY.md` is the list: [what a stranger can
+check](docs/VERIFY.md#what-anyone-can-check-right-now) with no identity, [what only a
+buyer can](docs/VERIFY.md#what-a-buyer-can-check-that-a-visitor-cannot), and [the
+limits](docs/VERIFY.md#the-limits-in-the-same-breath) stated in the same breath.
 
-Frontend iteration with hot reload (needs the network up and the backend
-deployed, since the Vite dev server shells out to `icp` to simulate the
-`ic_env` cookie the asset canister sets in production):
+The running backend is a published release: `scripts/release.sh` built it in a pinned
+container, installed that artifact, and gated on the canister reporting the same hash. So
+the module hash on chain has a counterpart anyone can reproduce — `docs/VERIFY.md` has
+[the commands](docs/VERIFY.md#is-the-backend-module-built-from-this-repo--compare-it-to-a-release)
+and [the limits that remain](docs/VERIFY.md#the-limits-in-the-same-breath).
 
-```sh
-icp network start -d && icp deploy backend
-npm --prefix src/frontend run dev
-```
+## Documents
 
-TypeScript bindings for the backend actor are regenerated from the committed
-Candid interface (`src/backend/dist/backend.did`) by the `icpBindgen` Vite
-plugin on every dev/build run — if you change the backend API, run
-`mops build` to refresh the `.did`, and the frontend will pick it up (or fail
-to typecheck, which is the point).
+For a **reader or verifier**:
 
-## Tests
+| | |
+|---|---|
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The diagram: canisters, money path, trust boundaries, the two cycle pots |
+| [`docs/DESIGN.md`](docs/DESIGN.md) | The decision record — *why* it is built this way. What the `§N` comments point at. Gate-enforced |
+| [`docs/STRIPE.md`](docs/STRIPE.md) | The Card rail end to end, written from the code: ingress, signature verification, attribution, dedup, pricing, the order lifecycle, refunds |
+| [`docs/TEST-COVERAGE.md`](docs/TEST-COVERAGE.md) | What is tested, how, and what is not |
+| [`docs/VERIFY.md`](docs/VERIFY.md) | What anyone can check about the live deployment, what they cannot, and the measured state of the module-hash chain |
 
-There are three suites:
+For an **operator**:
 
-**1. Motoko unit tests** (`test/*.test.mo`) — pure-logic coverage per module
-(state machine, idempotency, HMAC/Stripe signatures, HTTP routing, forex,
-treasury caps, …):
+| | |
+|---|---|
+| [`docs/OPERATE.md`](docs/OPERATE.md) | Setup, one procedure per mode: local, mainnet simulation, mainnet production |
+| [`RUNBOOK.md`](RUNBOOK.md) | Day-2 operations, entered by symptom: secret rotation, rate diagnosis, reserve sizing, obligation triage, monitoring |
+| [`RELEASE.md`](RELEASE.md) | Cutting a release: build, publish hashes, install, gate |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed per release |
+| [`docs/SANDBOX-TESTPLAN.md`](docs/SANDBOX-TESTPLAN.md) | The manual Stripe-sandbox pass required before go-live, and what a green run does not prove |
 
-```sh
-mops test
-```
+For an **agent changing the code**: [`AGENTS.md`](AGENTS.md) (conventions, skills, the verification
+gate), and [`docs/DESIGN.md`](docs/DESIGN.md) above — it is the primary surface for that audience, along
+with the invariant comments in `src/backend`. `docs/agents/` holds the loop's own
+conventions: the triage labels, the issue-tracker rules and `deleted-vocabulary.md`.
 
-**2. Frontend tests** (`src/frontend`):
-
-```sh
-npm --prefix src/frontend run test        # vitest unit tests
-npm --prefix src/frontend run typecheck
-```
-
-**3. PocketIC integration suite** (`test/integration`) — the **go-live bar**
-(spec §9): end-to-end scenarios against the real ICP ledger, CMC, cycles
-ledger, and ck-USDC ledger Wasms, with crafted HMAC-signed Stripe webhooks,
-mocked forex outcalls, time control, and upgrade-mid-flight replay checks:
-
-```sh
-cd test/integration
-npm ci
-npm test        # pretest fetches the sha256-pinned ledger wasm + builds the backend
-```
-
-Requirements: Node ≥ 20.11, `mops` on PATH, and a **4 KiB-page kernel** —
-macOS or x86_64 Linux are fine, but the replica cannot run inside arm64 Linux
-VMs with 16 KiB pages (e.g. Apple-Silicon Docker guests). See
-`test/integration/README.md` for the full scenario map and the ready-made CI
-job.
+Also: [`docs/DEMO-PLAYBOOK.md`](docs/DEMO-PLAYBOOK.md), the running order for demoing this to a technical
+audience.
 
 ## Release
 
-Releases are built reproducibly in a Docker-pinned toolchain and verified
-against the on-chain module hash:
+[`RELEASE.md`, Cutting a release](RELEASE.md#cutting-a-release) is the procedure: build in
+a digest-pinned container, publish the module hashes, install **that artifact**, and gate
+on the canister reporting the hash that was built. [`CHANGELOG.md`](CHANGELOG.md) records what each release changed, and the
+release script refuses a version that has no entry there.
 
-```sh
-scripts/reproducible-build.sh <git-ref>
-```
-
-See `RELEASE.md` for the full publish/verify procedure.
+⚠️ **`backend.wasm` depends on the build architecture**, so each release states the one
+it was built on and a verifier has to match it. `frontend.wasm` is the pinned recipe's
+module and proves nothing about the page — [`docs/VERIFY.md`](docs/VERIFY.md) has the
+check that does.

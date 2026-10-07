@@ -1,138 +1,1684 @@
-:root {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --border: #30363d;
-  --text: #e6edf3;
-  --muted: #8b949e;
-  --accent: #2f81f7;
-  --ok: #3fb950;
-  --warn: #d29922;
-  --err: #f85149;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+/* Internet Computer brand guidelines v2.30, applied.
+   Every value here comes from tokens.css — no hardcoded hex, which is the
+   guidelines' own review rule and what keeps the dark theme honest.
+
+   Rules this file is deliberately obeying, easy to undo by accident:
+     - no drop shadows, no gradients (grid paper is the one permitted texture)
+     - 1px hairlines only, always --icp-rule
+     - pill radius on CTAs only
+     - three faces: Newsreader (editorial), Inter (chrome), JetBrains Mono
+       (numerals, code); stat numbers are never Newsreader
+     - sentence case; UPPERCASE only for eyebrows and markers
+     - body prose never wider than 720px */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
-* { box-sizing: border-box; }
+/* The `hidden` attribute must beat every layout rule in this file.
+   The UA stylesheet's `[hidden] { display: none }` has lower specificity than a
+   class selector, so any `.foo { display: grid }` here silently re-shows an
+   element the app had hidden. It shipped twice that way — an audience chooser
+   that never went away, and a disabled rail's nav that was always on screen.
+   jsdom has no layout and no cascade, so the DOM suite could not see either:
+   `el.hidden` was true the whole time. */
+[hidden] {
+  display: none !important;
+}
+
+html {
+  color-scheme: light;
+}
+html[data-theme='dark'] {
+  color-scheme: dark;
+}
 
 body {
-  margin: 0 auto;
-  max-width: 720px;
-  padding: 0 1rem 4rem;
-  background: var(--bg);
-  color: var(--text);
-  line-height: 1.5;
+  margin: 0;
+  /* The full-bleed technique on .explainer.sunk uses 50vw, which counts the
+     scrollbar; clip the resulting sliver rather than letting the page scroll
+     sideways. */
+  overflow-x: clip;
+  background: var(--icp-bg);
+  color: var(--icp-fg);
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  letter-spacing: var(--tracking-body);
+  -webkit-font-smoothing: antialiased;
 }
 
-header {
+main,
+.site-header,
+.site-footer {
+  max-width: var(--shell);
+  margin: 0 auto;
+  padding-inline: var(--space-4);
+}
+
+/* Prose keeps the 720px measure inside the wider shell. Applied to the text
+   blocks rather than the container, so data (tiers, tables) can use the width. */
+.hero-copy,
+.explainer p,
+.explainer h2,
+.lede,
+.meta-strip,
+#order-status-line,
+.step-card p {
+  max-width: var(--measure);
+}
+
+/* ── type ─────────────────────────────────────────────────────────────────── */
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: var(--tracking-display);
+  line-height: 1.15;
+  margin: 0;
+}
+
+h1 {
+  font-size: clamp(2rem, 5.5vw, 3rem);
+  /* Keeps the two-column hero from breaking "Internet / Computer" across lines
+     and leaving a one-word orphan. */
+  text-wrap: balance;
+}
+
+/* The italic rule: one emphasis word per heading, carried in rust. */
+h1 em,
+h2 em,
+h3 em {
+  font-style: italic;
+  color: var(--icp-accent);
+}
+
+.section-h {
+  font-size: 1.375rem;
+  margin-bottom: var(--space-3);
+}
+
+.eyebrow {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--icp-fg-secondary);
+}
+
+.lede {
+  font-size: 1.25rem;
+  color: var(--icp-fg-secondary);
+  margin: var(--space-4) 0 0;
+}
+
+.meta-strip {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  color: var(--icp-fg-secondary);
+  margin: var(--space-4) 0 0;
+}
+.meta-strip .dot {
+  color: var(--icp-fg-muted);
+  margin-inline: var(--space-2);
+}
+
+.muted {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--icp-fg-muted);
+}
+
+.mono,
+code,
+.order-facts dd,
+input[type='text'] {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+code {
+  font-size: 0.875em;
+  background: var(--icp-bg-sunk);
+  padding: 0.1em 0.35em;
+  border-radius: var(--radius-sm);
+}
+
+a {
+  color: var(--icp-accent);
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 1px;
+}
+a:hover {
+  color: var(--icp-accent-strong);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* ── header ───────────────────────────────────────────────────────────────── */
+
+.site-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 1.5rem 0 1rem;
-  border-bottom: 1px solid var(--border);
-}
-h1 { margin: 0; font-size: 1.4rem; }
-h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
-.tagline { margin: 0; color: var(--muted); font-size: 0.85rem; }
+  gap: var(--space-4);
+  padding-block: var(--space-5) var(--space-4);
+  /* ⚠️ **Both wraps are load-bearing on a phone, and there is deliberately no
+     breakpoint.** Signed in, this row carries the wordmark, two nav links, the theme
+     toggle, the principal, its copy button and Sign out: a 457px floor that no
+     phone gives it. Without wrapping, the header sets the PAGE width, so the whole
+     document scrolled sideways — measured at +137px on a 320px viewport, +99px at
+     358px and +67px at 390px — and the content column, sized to the viewport rather
+     than to the header, was left looking narrow beside it.
 
-button, .pay-button {
-  font: inherit;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
-  color: var(--text);
-  padding: 0.45rem 0.9rem;
-  cursor: pointer;
-  text-decoration: none;
-  display: inline-block;
+     Content-driven rather than a media query, because the floor is a function of
+     what the header holds: another nav link or a longer translation moves it, and a
+     hardcoded width would then be wrong in a way nothing reports. Given room, wrap
+     does nothing.
+
+     One row per line and `space-between`: with the actions on their own line each
+     line holds a single item, so it sits at the start, and the wordmark stops
+     breaking into two lines because it finally has the width. */
+  flex-wrap: wrap;
 }
-button:disabled { opacity: 0.45; cursor: not-allowed; }
-button.primary, .pay-button {
-  background: var(--accent);
-  border-color: var(--accent);
+.wordmark {
+  text-decoration: none;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  /* 346px of controls against 288px of usable width at 320px: the actions have to
+     break internally too, not just onto their own row. */
+  flex-wrap: wrap;
+}
+
+/* ── hero, with the one permitted texture ─────────────────────────────────── */
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: var(--space-7);
+  align-items: center;
+  padding-block: var(--space-7) var(--space-6);
+  background-image:
+    linear-gradient(to right, var(--grid-ink) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--grid-ink) 1px, transparent 1px);
+  background-size: var(--grid-tile) var(--grid-tile);
+  border-bottom: 1px solid var(--icp-rule);
+}
+
+.steps {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  padding: 0;
+  margin: var(--space-5) 0 0;
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-fg-secondary);
+}
+.steps li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+/* ── the way in ───────────────────────────────────────────────────────────── */
+
+/* One button, on the landing view, and nothing to choose before it. */
+/* The action row inside the hero's argument column: button first, its price
+   qualifier beside it as fine print. `align-items: center` because a pill and two
+   lines of small text match on their centres, not their boxes. Wraps on a narrow
+   screen so the note goes under the button rather than squeezing it. */
+.hero-action {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--icp-rule);
+}
+
+/* Narrow on purpose: beside a button this is fine print, and fine print that runs
+   the full measure stops reading as subordinate. `.meta-strip` still supplies the UI
+   face and the size, so the browser suite's font assertion keeps its subject. */
+.hero-action-note {
+  margin: 0;
+  max-width: 24ch;
+}
+
+/* The row it sits in carried the emptiness that made the button look small. */
+/* ── the stats, promoted out of the old trust block ───────────────────────── */
+
+.trust-block {
+  padding-block: var(--space-6);
+  border-bottom: 1px solid var(--icp-rule);
+}
+/* The page's largest numerals, because these are the only figures on it a
+   visitor can check without trusting us. `tabular-nums` so a poll tick that
+   changes a digit does not shift the layout. */
+.trust-figures .figure {
+  font-size: clamp(2rem, 5vw, 3.25rem);
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+  color: var(--icp-fg);
+}
+.trust-frame {
+  max-width: 46ch;
+  margin-top: var(--space-3);
+}
+
+/* The banner region sits above every view, so it needs its own rhythm rather than
+   inheriting a view's. Empty of visible children it collapses to nothing, which is
+   the normal case. */
+#banners {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+#banners:not(:empty) > *:not([hidden]) {
+  margin-block: 0;
+}
+
+/* An icon-only button: square, so the glyph is centred rather than sitting in a
+   pill sized for a word. */
+.icon-only {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2.1rem;
+  min-height: 2rem;
+  padding: 0;
+}
+.icon-only svg {
+  display: block;
+}
+
+/* ── buttons ──────────────────────────────────────────────────────────────── */
+
+button,
+.cta,
+.cta-secondary {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* Pill radius is for CTAs and nothing else. */
+.cta,
+.cta-secondary {
+  display: inline-block;
+  padding: 0.5rem 1.15rem;
+  border-radius: var(--radius-pill);
+  text-decoration: none;
+  border: 1px solid transparent;
+}
+.cta {
+  background: var(--icp-accent);
   color: #fff;
+  border-color: var(--icp-accent);
+}
+
+/* The one control that commits the purchase. It sat at body scale below a section
+   answering a question the buyer could not act on; with that section gone it follows
+   the amount directly and is sized to match what it does. Not full width: a button as
+   wide as the page reads as a banner rather than a target. */
+.cta-buy {
+  /* Above the body scale, which is 1.0625rem here: a "prominent" button set at exactly
+     the size of the prose around it is not prominent, and a browser test comparing the
+     two is what caught that the first attempt matched it to the pixel. */
+  font-size: 1.1875rem;
+  padding: 0.8rem 1.8rem;
+  margin-top: var(--space-5);
+}
+.cta:hover:not(:disabled) {
+  background: var(--icp-accent-strong);
+  border-color: var(--icp-accent-strong);
+  color: #fff;
+}
+.cta-secondary {
+  background: transparent;
+  color: var(--icp-accent);
+  border-color: var(--icp-accent);
+}
+.cta-secondary:hover:not(:disabled) {
+  background: var(--icp-accent-dim);
+}
+
+/* The landing CTA, and the ONLY place this size is used — a second oversized button
+   would make neither of them prominent.
+   ⚠️ **Declared AFTER `.cta`, and that is the whole reason it works.** It first sat
+   in the "way in" section above, where `.cta`'s own `padding: 0.5rem 1.15rem` came
+   LATER at equal specificity and silently won: the button grew by 2px and read as an
+   ordinary pill. Caught by looking at a screenshot, because the visual baselines that
+   would have caught it are suspended for this phase. A `.cta.cta-hero`
+   selector would also work; declaration order is the smaller change and keeps every
+   button rule at one class. */
+.cta-hero {
+  font-size: 1.25rem;
+  padding: 1.05rem 2.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.cta:disabled,
+.cta-secondary:disabled,
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ghost,
+.copy {
+  background: transparent;
+  color: var(--icp-fg-secondary);
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-md);
+  padding: 0.35rem 0.8rem;
+}
+.ghost:hover,
+.copy:hover {
+  color: var(--icp-fg);
+  border-color: var(--icp-fg-muted);
+}
+
+/* ⚠️ A destructive TINT, not a filled red button. Filled red beside the filled
+   accent CTA gives the page two loud controls and shouts the choice a buyer is less
+   likely to want. The border carries it as well as the text, so the signal is not
+   colour alone, and `:hover` commits further rather than being the first hint. */
+.ghost.danger {
+  color: var(--icp-err);
+  border-color: var(--icp-err-edge);
+}
+.ghost.danger:hover {
+  color: var(--icp-err);
+  border-color: var(--icp-err);
+  background: var(--icp-err-wash);
+}
+
+.linklike {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--icp-accent);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+}
+
+:focus-visible {
+  outline: 2px solid var(--icp-accent);
+  outline-offset: 2px;
+}
+
+/* ── amounts ──────────────────────────────────────────────────────────────── */
+
+.tiers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--space-3);
+}
+.tier {
+  text-align: left;
+  padding: var(--space-3) var(--space-4);
+  background: var(--icp-bg-elev);
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-md);
+  color: inherit;
+}
+.tier:hover {
+  border-color: var(--icp-fg-muted);
+}
+.tier.selected {
+  border-color: var(--icp-accent);
+  background: var(--icp-accent-dim);
+}
+/* Custom is a peer of the presets, so it inherits `.tier` wholesale. It differs only
+   in that its headline is a WORD, which the display face sets better than the mono
+   face the numerals use. */
+.tier-custom .amount {
+  font-family: var(--font-display);
+}
+
+/* Numerals are JetBrains Mono, never Newsreader. */
+.tier .amount {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+.tier .cycles {
+  display: block;
+  margin-top: var(--space-1);
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--icp-fg-secondary);
+}
+
+.amount-label {
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-fg-secondary);
+  max-width: 22rem;
+}
+.amount-label input[type='text'] {
+  display: block;
+  width: 100%;
+  margin-top: var(--space-2);
+  padding: 0.5rem 0.65rem;
+  font-family: var(--font-mono);
+  font-size: 1rem;
+  background: var(--icp-bg-elev);
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-md);
+  color: var(--icp-fg);
+}
+.amount-label input[type='text']:focus {
+  border-color: var(--icp-accent);
+  outline: none;
+}
+/* Disabled until the bounds are known: offering a range we cannot vouch for is
+   worse than waiting for one. */
+.amount-label input[type='text']:disabled {
+  background: var(--icp-bg-sunk);
+  color: var(--icp-fg-muted);
+  cursor: not-allowed;
+}
+
+#custom-panel {
+  margin-top: var(--space-4);
+}
+.providers {
+  margin-top: var(--space-3);
+}
+
+/* ── notices ──────────────────────────────────────────────────────────────── */
+
+.notice {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  border: 1px solid var(--icp-rule);
+  border-left: 3px solid var(--icp-warn);
+  border-radius: var(--radius-md);
+  background: var(--icp-bg-sunk);
+  padding: var(--space-3) var(--space-4);
+  margin-block: var(--space-4);
+  color: var(--icp-fg-secondary);
+}
+.error {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-err);
+}
+
+.tone-ok { color: var(--icp-ok); }
+.tone-warn { color: var(--icp-warn); }
+.tone-err { color: var(--icp-err); }
+.tone-active { color: var(--icp-accent); }
+
+/* ── order ────────────────────────────────────────────────────────────────── */
+
+#active-order,
+#history,
+.explainer {
+  padding-block: var(--space-6);
+  border-top: 1px solid var(--icp-rule);
+}
+
+
+/* ── the CLI page: numbered steps ─────────────────────────────────────────── */
+
+/* Step one is a prerequisite performed in a BROWSER, not the terminal, and skipping it
+   makes step two fail outright — so it is tinted to read differently from the command
+   steps without leaving the sequence. */
+.step-prereq {
+  background: var(--icp-bg-elev);
+  border: 1px solid var(--icp-rule);
+  border-left: 3px solid var(--icp-warn);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-4) var(--space-4) 3.25rem;
+  margin-left: -0.5rem;
+}
+
+/* The numeral sits inside the tinted box rather than in the page gutter. */
+.cli-steps > li.step-prereq::before {
+  left: var(--space-4);
+  top: var(--space-4);
+}
+
+/* A quiet aside after the procedure. Deliberately NOT `.explainer.sunk`, which breaks
+   out to full bleed with its own background: that is a landing-page band, and directly
+   under a numbered procedure it reads as a different page pasted on. */
+.cli-aside {
+  margin-top: var(--space-7);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--icp-rule);
+  max-width: var(--measure);
+}
+
+.cli-aside h3 {
+  margin: 0 0 var(--space-2);
+}
+
+.cli-aside p {
+  margin: 0;
+}
+
+/* Numbers come from the list, not from hand-written eyebrows: the previous version
+   had "Step 3 of 4" typed into the markup, which went stale the moment the count
+   changed and said nothing to a screen reader. */
+.cli-steps {
+  list-style: none;
+  counter-reset: cli-step;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-6);
+}
+
+.cli-steps > li {
+  counter-increment: cli-step;
+  display: grid;
+  gap: var(--space-3);
+  /* Room for the numeral in the gutter, so the step bodies align with each other
+     rather than each indenting by its own label width. */
+  padding-left: 2.75rem;
+  position: relative;
+}
+
+.cli-steps > li::before {
+  content: counter(cli-step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.9rem;
+  height: 1.9rem;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--icp-accent);
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-pill);
+}
+
+.cli-steps h3 {
+  margin: 0;
+}
+
+.cli-steps p {
+  margin: 0;
+}
+
+/* The value the command must print, tied to the command above it. */
+.expect {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* ── the purchase head, and status as a badge ─────────────────────────────── */
+
+.purchase-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.purchase-head h2 {
+  margin: 0;
+}
+
+/* IMPORTANT: the tone class supplies the colour, and the border picks it up through
+   `currentColor`, so the badge is never colour on its own: it has an outline, a
+   background wash and uppercase tracking. A delivered order and a failed one differ
+   in shape as well as hue. */
+.status-pill {
+  margin: 0;
+  align-self: center;
+  font-family: var(--font-ui);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.6rem;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+  background: var(--icp-bg-elev);
+  white-space: nowrap;
+}
+
+/* The next step, sitting with the purchase rather than under the arithmetic. */
+/* ⚠️ **`inline-flex`, not `grid`, and that was a real bug.** As a grid the child
+   stretched to the 34rem cap, so a two-word link rendered as an 870px bordered box -
+   and `a.ghost` inherited the global anchor underline on top, giving one control two
+   fighting affordances: a box that also looks like a link. */
+.next-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-5) 0;
+}
+
+/* A ghost anchor is a BUTTON that happens to be a link, so it does not take the
+   underline every other anchor gets. */
+a.ghost {
+  text-decoration: none;
+}
+a.ghost:hover {
+  text-decoration: none;
+}
+
+/* The action anchored inside the receipt card: caption, then the control. Separated
+   by a rule so it reads as the card's footer rather than another fact row. */
+.card-action {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--icp-rule);
+}
+
+.card-action p {
+  margin: 0;
+}
+
+/* The collapsed proof. `summary` carries the heading face, and the marker stays so the
+   control reads as openable. */
+#receipt-details > summary {
+  cursor: pointer;
+  margin-bottom: var(--space-4);
+}
+
+.next-step p {
+  margin: 0;
+}
+
+/* ── the checkout summary ─────────────────────────────────────────────────── */
+
+.checkout-summary {
+  background: var(--icp-bg-elev);
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  margin: var(--space-5) 0;
+  /* Its own measure: the two amount rows read as a pair, and a card as wide as the
+     page puts label and figure too far apart to associate. */
+  max-width: 34rem;
+}
+
+.checkout-amounts {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.checkout-amounts > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.checkout-amounts dt {
+  font-family: var(--font-ui);
+  color: var(--icp-fg-secondary);
+}
+
+/* The two figures a buyer is deciding on. Deliberately the largest text in the
+   section: they used to sit at body weight in a list below both buttons. */
+.checkout-amounts .amount {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 1.375rem;
+  color: var(--icp-fg);
+  margin: 0;
+  text-align: right;
+}
+
+.fee-note {
+  /* Hangs under the figure it explains, right-aligned to sit with it rather than
+     with the label on the other side of the row. */
+  text-align: right;
+  font-size: 0.8125rem;
+  margin: calc(var(--space-2) * -1) 0 0;
+}
+
+.checkout-terms {
+  display: grid;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 0;
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--icp-rule);
+  font-size: 0.9375rem;
+}
+
+.checkout-terms > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.checkout-terms dt {
+  font-family: var(--font-ui);
+  color: var(--icp-fg-secondary);
+}
+
+.checkout-terms dd {
+  margin: 0;
+  text-align: right;
+}
+
+/* The two actions on one row, wrapping on a narrow screen rather than forcing the
+   page sideways. `align-items: center` because the CTA is a pill and the cancel a
+   rectangle: matching their vertical centres reads level, matching their boxes does
+   not. */
+.order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-5) 0 var(--space-3);
+}
+
+.order-ident,
+.order-ref {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.875rem;
+}
+
+.order-ref {
+  margin-top: var(--space-6);
+}
+
+.order-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin-block: var(--space-4);
+  font-size: 0.9375rem;
+}
+.order-facts dt {
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  color: var(--icp-fg-muted);
+}
+.order-facts dd {
+  margin: 0;
+}
+
+/* The CLI handoff: an inverse bar, near-black in BOTH themes by rule. */
+.handoff {
+  background: var(--icp-cta-bar);
+  color: var(--icp-cta-bar-fg);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  margin-block: var(--space-5);
+}
+.handoff .section-h,
+.handoff p {
+  color: var(--icp-cta-bar-fg);
+}
+.handoff .muted {
+  color: var(--icp-cta-bar-muted);
+}
+.handoff a {
+  color: var(--icp-accent);
+}
+.handoff code {
+  background: var(--icp-cta-bar-wash);
+  color: var(--icp-cta-bar-fg);
+}
+.cmd {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-block: var(--space-3);
+}
+.cmd code {
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: var(--space-2) var(--space-3);
+  flex: 1;
+}
+.handoff .copy {
+  color: var(--icp-cta-bar-fg);
+  border-color: var(--icp-cta-bar-edge);
+  flex: none;
+}
+.handoff .copy:hover {
+  border-color: var(--icp-cta-bar-fg);
+  color: var(--icp-cta-bar-fg);
+}
+
+#receipt-area > summary {
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-fg-secondary);
+}
+.estimate-detail,
+.estimate {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--icp-fg-secondary);
+  margin: var(--space-2) 0 0;
+}
+
+/* ── history ──────────────────────────────────────────────────────────────── */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+th,
+td {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--icp-rule);
+}
+th {
+  font-family: var(--font-ui);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--icp-fg-muted);
+  font-weight: 500;
+}
+td {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+}
+tbody tr:hover {
+  background: var(--icp-bg-sunk);
+}
+.buy-again {
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  background: none;
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-md);
+  padding: 0.2rem 0.6rem;
+  color: var(--icp-accent);
+}
+.buy-again:hover {
+  background: var(--icp-accent-dim);
+}
+
+/* ── explainers ───────────────────────────────────────────────────────────── */
+
+/* Full-bleed tint while the prose stays on the 720px measure. Done with
+   cancelling margin/padding rather than a spread box-shadow: the guidelines ban
+   drop shadows, and a `box-shadow` used as a bleed trick reads as a violation
+   even when it casts nothing. */
+.explainer.sunk {
+  background: var(--icp-bg-sunk);
+  margin-inline: calc(-1 * (50vw - 50%));
+  padding-inline: calc(50vw - 50%);
+}
+.explainer p {
+  margin: 0;
+}
+
+/* The two trust figures. Laid out with grid + gap rather than per-element margins so
+   hiding the delivered block collapses cleanly instead of leaving a gap behind. */
+.trust-figures {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: var(--space-4);
+  margin: var(--space-4) 0 0;
+}
+.trust-figures dt {
+  font-size: 0.8125rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--icp-fg-muted);
+}
+.trust-figures dd {
+  margin: var(--space-1) 0 0;
+  /* Digits line up between the two figures rather than drifting. */
+  font-variant-numeric: tabular-nums;
+  font-size: 1.125rem;
+  color: var(--icp-fg);
+}
+
+#auth-area {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+#auth-area .principal {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--icp-fg-muted);
+}
+/* The identity and its copy button are one thing; `#auth-area`'s gap separates that
+   pair from Sign out. */
+.identity-pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+/* A copy button beside an inline value, not under a command block: the standard
+   `.copy` padding is sized for the latter and overwhelms a header row. */
+.copy-inline {
+  padding: 0.15rem 0.3rem;
+}
+
+/* ── Copy buttons are an ICON, and the state is an attribute ────────────────── */
+/* One definition of what copying looks like, so the header, the operator console
+   and the three command blocks cannot drift apart. `data-state` rather than the
+   button's text: the label is gone, and CSS reading a state attribute is also what
+   the tests assert on, so there is one source for both. */
+.copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  min-height: 1.9rem;
+}
+.copy svg {
+  display: block;
+}
+.copy[data-state="copied"] {
+  color: var(--icp-ok);
+  border-color: currentColor;
+}
+/* ⚠️ Failure is VISIBLE. A button that reports success and stays silent on failure
+   is indistinguishable from one that ignored the click, which is exactly the bug
+   this replaced. */
+.copy[data-state="failed"] {
+  color: var(--icp-err);
+  border-color: currentColor;
+}
+
+.site-footer {
+  margin-top: var(--space-7);
+  padding-block: var(--space-5) var(--space-8);
+  border-top: 1px solid var(--icp-rule);
+}
+
+/* ── the guided tour ──────────────────────────────────────────────────────── */
+
+.step-card {
+  padding: var(--space-5);
+  border-radius: var(--radius-md);
+  margin-block: var(--space-4);
+}
+/* Step 3 is the primary action, so it takes the inverse bar. Near-black in both
+   themes, by rule. */
+.step-card.handoff .eyebrow {
+  color: var(--icp-cta-bar-muted);
+}
+.step-card.outlined {
+  border: 1px solid var(--icp-rule);
+  border-left: 3px solid var(--icp-section-default);
+  background: var(--icp-bg-elev);
+}
+.step-card .section-h {
+  margin-top: var(--space-2);
+}
+
+#order-details > summary {
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-fg-secondary);
+  padding-block: var(--space-2);
+}
+
+.header-link {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  text-decoration: none;
+}
+.header-link:hover {
+  text-decoration: underline;
+}
+
+
+/* ── the four-step flow figure ────────────────────────────────────────────── */
+
+.flow {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-5);
+
+  /* The connector and the travelling pulse are BACKGROUND LAYERS of this
+     container, not pseudo elements. A background always paints below its own
+     element's content, so the opaque node fills mask both and neither can ever
+     cross a numeral.
+     They were absolutely-positioned pseudo elements, and they did cross: the
+     hairline ran down through every digit and the 5px pulse parked on the "1" and
+     erased it. z-index does not fix it here. `.flow-step` animates its opacity,
+     which puts each step on its own composited layer; sinking the pseudo elements
+     to `z-index: -1` and raising the steps to `z-index: 1` were both measured at
+     8x magnification and neither moved them. Backgrounds need no ordering trick.
+     Layer 1: the pulse, a 5px rust dot. Layer 2: the connector, a 1px hairline,
+     as every rule in this system is. */
+  background-image:
+    radial-gradient(circle 2.5px at 2.5px 2.5px, var(--icp-accent) 99%, transparent 100%),
+    linear-gradient(var(--icp-rule), var(--icp-rule));
+  background-repeat: no-repeat, no-repeat;
+  /* The dot has NO SIZE in the base style, and the animation is what grows it.
+     So anything that stops the animation — a paused page, a screenshot tool that
+     rewinds to the base style, reduced motion — shows the figure with no dot at
+     all, rather than one parked on the "1" for good. */
+  background-size:
+    0 0,
+    1px calc(100% - 36px);
+  background-position:
+    15px 18px,
+    17px 18px;
+  animation: flow-pulse 8s linear infinite;
+}
+
+/* `background-position` relative to the container, so the travel tracks the
+   figure's real height instead of a hardcoded pixel guess that breaks the moment
+   a label wraps.
+   The dot grows in and shrinks out via `background-size` rather than fading via
+   opacity, which a single background layer cannot do. Same effect, and it earns
+   something the old fade did not: at rest the dot has **no size at all**, so a
+   paused or screenshotted page shows a clean figure instead of a rust smudge
+   parked on the "1". */
+@keyframes flow-pulse {
+  /* ⚠️ **The stops are the RING SCHEDULE, not an even ramp, and that is the whole fix.**
+     The dot used to travel linearly across the full 8s while each node rings on its own
+     `--i * 2s - 1s` delay, so the two ran on unrelated clocks and the dot fell
+     progressively behind: measured at 5px adrift of node 2, 22px of node 3 and 40px of
+     node 4 at the start of each ring, which is two thirds of a step by the bottom.
+
+     `flow-ring` lights node i from 8% to 22% of its own cycle, so the ring centres land
+     at 2.5%, 27.5%, 52.5% and 77.5% of this timeline. Those are the stops below, and at
+     each one the dot sits on that node.
+
+     The node positions are thirds of the rail rather than measured pixels because the
+     four rows are equal height, so their centres are evenly spaced whatever the labels
+     do. The rail spans 18px to calc(100% - 23px), so the span is `100% - 41px` and the
+     interior nodes are one and two thirds along it. A wrapping label moves all four
+     together and the alignment survives; a hardcoded pixel guess would not. */
+  0% {
+    background-position:
+      15px 18px,
+      17px 18px;
+    background-size:
+      0 0,
+      1px calc(100% - 36px);
+  }
+  /* Grown and on node 1 exactly as node 1 rings. */
+  2.5% {
+    background-position:
+      15px 18px,
+      17px 18px;
+    background-size:
+      5px 5px,
+      1px calc(100% - 36px);
+  }
+  27.5% {
+    background-position:
+      15px calc(18px + (100% - 41px) / 3),
+      17px 18px;
+    background-size:
+      5px 5px,
+      1px calc(100% - 36px);
+  }
+  52.5% {
+    background-position:
+      15px calc(18px + (100% - 41px) * 2 / 3),
+      17px 18px;
+    background-size:
+      5px 5px,
+      1px calc(100% - 36px);
+  }
+  /* On node 4 as it rings, then held while it shrinks out: the dot must not drift on
+     past the last step, because there is no fifth node for it to be arriving at. */
+  77.5%,
+  90% {
+    background-position:
+      15px calc(100% - 23px),
+      17px 18px;
+    background-size:
+      5px 5px,
+      1px calc(100% - 36px);
+  }
+  100% {
+    background-position:
+      15px calc(100% - 23px),
+      17px 18px;
+    background-size:
+      0 0,
+      1px calc(100% - 36px);
+  }
+}
+
+.flow-step {
+  display: grid;
+  grid-template-columns: 35px 1fr;
+  gap: var(--space-3);
+  align-items: center;
+  /* Resting state is legible on its own: the animation raises attention, it does
+     not carry information. */
+  opacity: 0.55;
+  animation: flow-dim 8s calc(var(--i) * 2s - 1s) infinite;
+}
+
+@keyframes flow-dim {
+  0%, 4% { opacity: 0.55; }
+  8%, 22% { opacity: 1; }
+  26%, 100% { opacity: 0.55; }
+}
+
+.flow-node {
+  display: grid;
+  place-items: center;
+  width: 35px;
+  height: 35px;
+  border: 1px solid var(--icp-rule);
+  border-radius: var(--radius-pill);
+  background: var(--icp-bg);
+  animation: flow-ring 8s calc(var(--i) * 2s - 1s) infinite;
+}
+
+@keyframes flow-ring {
+  0%, 4% { border-color: var(--icp-rule); }
+  8%, 22% { border-color: var(--icp-accent); }
+  26%, 100% { border-color: var(--icp-rule); }
+}
+
+.flow-n {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  color: var(--icp-fg-secondary);
+}
+
+.flow-body {
+  display: grid;
+  gap: 2px;
+}
+.flow-label {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-fg);
+}
+.flow-detail {
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  color: var(--icp-fg-muted);
+  justify-self: start;
+}
+code.flow-detail {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+/* Motion is decoration here, so it goes entirely rather than being slowed down.
+   Every step rests fully legible, which is why this is a clean removal. */
+@media (prefers-reduced-motion: reduce) {
+  .flow-step,
+  .flow-node {
+    animation: none;
+    opacity: 1;
+  }
+  /* The pulse layer goes with the animation: a rust dot parked forever on the
+     first node is not a resting state, it is a smudge. The connector stays. */
+  .flow {
+    animation: none;
+    background-image: linear-gradient(var(--icp-rule), var(--icp-rule));
+    background-size: 1px calc(100% - 36px);
+    background-position: 17px 18px;
+  }
+}
+
+/* One column below the fold-out width: the figure stacks under the prose rather
+   than being squeezed into a column too narrow for the commands. */
+@media (max-width: 860px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-6);
+  }
+}
+
+/* Problems attached to an order. Reuses `.notice`'s frame, so it sits in the
+   same visual language as the lock notice rather than introducing a second warning
+   idiom. */
+#order-problems h3 {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  margin: 0 0 0.5rem;
+}
+#order-problem-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+/* ⚠️ Resolved problems stay VISIBLE and struck through rather than being filtered out:
+   nothing drops, so a buyer whose refund was reconciled should see
+   that it happened AND that it was dealt with. Colour alone would not carry that, so the
+   line-through does the work and the muted colour reinforces it. */
+#order-problem-list li.resolved {
+  text-decoration: line-through;
+  color: var(--icp-fg-muted);
+}
+
+/* ── operator console ──────────────────────────────────────────────────
+   The wait-versus-work distinction is carried by ORDER, HEADING and a token
+   colour. Not by symbols: brand-lint bans pictographs in user-facing copy, and
+   the warning and tick glyphs that would otherwise do this job are pictographs.
+
+   Whether an operator can actually tell the groups apart is a cascade-and-layout
+   property, so it is asserted in the Chromium suite. jsdom would only confirm the class
+   was applied — to something that may be invisible on screen. */
+.summary-groups {
+  display: grid;
+  gap: var(--space-4, 1rem);
+  grid-template-columns: 1fr;
+}
+
+@media (min-width: 48rem) {
+  .summary-groups {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.summary-group {
+  border-left: 3px solid var(--icp-rule);
+  padding-left: var(--space-3, 0.75rem);
+}
+
+/* The act group is first in the DOM and carries the only non-neutral edge on the
+   panel, so the eye reaches it before the other. */
+#summary-act {
+  border-left-color: var(--icp-warn);
+}
+
+.summary-h {
+  font-family: var(--font-ui);
+  font-size: 0.8rem;
+  letter-spacing: var(--tracking-eyebrow);
+  text-transform: uppercase;
+  color: var(--icp-fg-secondary);
+}
+
+.figures {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.15rem 1rem;
+}
+
+.figures dt {
+  color: var(--icp-fg-secondary);
+}
+
+.figures dd {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* A count that is zero is not news. One that is not zero, in the group that
+   needs a person, is the whole point of the panel. */
+#summary-act .figures dd[data-zero="false"] {
+  color: var(--icp-err);
   font-weight: 600;
 }
 
-.rails { display: flex; gap: 0.5rem; margin-top: 1.25rem; }
-.rail.active { border-color: var(--accent); color: var(--accent); font-weight: 600; }
-.soon { font-size: 0.7rem; color: var(--muted); }
-
-.amount-label { display: block; font-size: 0.9rem; }
-.ck-actions { display: flex; gap: 0.6rem; margin: 0.6rem 0; }
-
-.tiers { display: flex; flex-wrap: wrap; gap: 0.6rem; }
-.tier {
-  min-width: 9rem;
-  text-align: left;
-  padding: 0.7rem 0.9rem;
+#summary-act .figures dd[data-zero="true"],
+#summary-wait .figures dd {
+  color: var(--icp-fg-muted);
 }
-.tier.selected { border-color: var(--accent); outline: 1px solid var(--accent); }
-.tier .amount { font-size: 1.2rem; font-weight: 700; display: block; }
-.tier .cycles { color: var(--muted); font-size: 0.8rem; }
 
-form { margin-top: 0.5rem; }
-.radio { display: block; margin: 0.3rem 0; }
-.dest-fields { margin: 0.6rem 0 0.6rem 1.4rem; }
-.dest-fields label { display: block; margin-bottom: 0.5rem; font-size: 0.9rem; }
-input[type="text"] {
-  display: block;
-  width: 100%;
-  max-width: 32rem;
-  margin-top: 0.2rem;
-  padding: 0.45rem 0.6rem;
-  font: inherit;
-  font-family: ui-monospace, monospace;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
+#admin-link-command {
+  overflow-x: auto;
 }
-#create-order { margin-top: 0.8rem; }
 
-.notice {
-  border: 1px solid var(--warn);
-  border-radius: 6px;
-  padding: 0.6rem 0.9rem;
-  margin-top: 1rem;
-  color: var(--warn);
+/* Worklists. The two that need a person come first and carry the warm edge; the two
+   that clear themselves are visually quieter. Same device as the summary groups, for
+   the same reason: the distinction cannot be a glyph. */
+.worklist {
+  border-left: 3px solid var(--icp-warn);
+  padding-left: var(--space-3, 0.75rem);
+  margin-block: var(--space-4, 1rem);
 }
-.error { color: var(--err); }
-.muted { color: var(--muted); font-size: 0.85rem; }
 
-.timeline {
+.worklist.wait {
+  border-left-color: var(--icp-rule);
+}
+
+.worklist-rows {
   list-style: none;
-  display: flex;
-  gap: 0;
   padding: 0;
-  margin: 0.8rem 0;
+  margin: 0;
 }
-.timeline li {
-  flex: 1;
-  text-align: center;
-  font-size: 0.8rem;
-  color: var(--muted);
-  border-top: 3px solid var(--border);
-  padding-top: 0.4rem;
+
+.worklist-row {
+  border-top: 1px solid var(--icp-rule);
+  padding-block: var(--space-2, 0.5rem);
 }
-.timeline li.done { border-top-color: var(--ok); color: var(--text); }
-.timeline li.now { border-top-color: var(--accent); color: var(--accent); font-weight: 600; }
 
-.tone-ok { color: var(--ok); }
-.tone-warn { color: var(--warn); }
-.tone-err { color: var(--err); }
-.tone-active { color: var(--accent); }
+.worklist-title {
+  font-family: var(--font-mono);
+  margin: 0;
+}
 
-.order-facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 1rem; }
-.order-facts dt { color: var(--muted); }
-.order-facts dd { margin: 0; font-family: ui-monospace, monospace; }
+.worklist-detail {
+  margin: 0.1rem 0 0.25rem;
+}
 
-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
-th { color: var(--muted); font-weight: 500; }
-tbody tr { cursor: pointer; }
-tbody tr:hover { background: var(--panel); }
+/* What to do is the operative half of a hint, so it does not read as more prose. */
+.worklist-then {
+  border-left: 2px solid var(--icp-rule);
+  padding-left: var(--space-2, 0.5rem);
+  color: var(--icp-fg-secondary);
+}
 
-#auth-area { display: flex; align-items: center; gap: 0.6rem; }
-#auth-area .principal { font-family: ui-monospace, monospace; font-size: 0.85rem; color: var(--muted); }
+#admin-refusals .worklist-row[data-urgency="wait"] .worklist-title {
+  color: var(--icp-fg-muted);
+}
 
-footer { margin-top: 3rem; border-top: 1px solid var(--border); padding-top: 1rem; }
-code { font-family: ui-monospace, monospace; background: var(--panel); padding: 0.1rem 0.3rem; border-radius: 4px; }
+/* ── the operator console's tables ──────────────────────────────────── */
+
+/* ⚠️ `.worklist-rows` is a <tbody> now, and `.worklist-row` a <tr>. The list reset above
+   is harmless on a tbody, but `padding-block` on a row does nothing: cell padding is the
+   only thing that spaces a table row, so it moves to the cells here. */
+.wl-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+/* ⚠️ **The scroll container is this WRAPPER, and the table must stay a `table`.**
+   `display: block` on the table itself does give it a scrollbar, but it also turns
+   the rows into an anonymous auto-width table box, so `width: 100%` stops reaching
+   them: measured 387px of columns adrift inside a 1008px panel on the desktop
+   console, and 518px inside 1008px for the buyer's order history. Wrapping instead
+   keeps `width: 100%` doing its job at full width and still confines the overflow.
+
+   ⚠️ **Without a container the columns are not merely off-screen, they are
+   unreachable** — `body` sets `overflow-x: clip`, so the document does not scroll
+   sideways to reveal them. The order history needed 449px against a 358px phone and
+   lost its last columns silently. */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.wl-table thead th {
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--icp-fg-secondary);
+  border-bottom: 1px solid var(--icp-rule);
+  padding: var(--space-2, 0.5rem) var(--space-3, 0.75rem) var(--space-2, 0.5rem) 0;
+  white-space: nowrap;
+}
+
+.wl-table td {
+  padding: var(--space-2, 0.5rem) var(--space-3, 0.75rem) var(--space-2, 0.5rem) 0;
+  vertical-align: top;
+}
+
+/* The row rule survives the move from <li> to <tr>: it is what separates one obligation
+   from the next when a cell wraps to two lines. */
+.wl-table tbody tr {
+  border-top: 1px solid var(--icp-rule);
+}
+
+/* A sortable header is a control, so it says so on hover and takes focus from the
+   keyboard through the delegated handler on the console. */
+.wl-table th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+}
+
+.wl-table th[data-sort]:hover {
+  color: var(--icp-fg);
+}
+
+/* ⚠️ The sort direction is drawn with BORDERS, not a glyph: brand-lint bans pictographs
+   in user-facing copy and an arrow character is the obvious thing to reach for here.
+   `aria-sort` is the single source of truth, so what assistive tech reads and what is
+   drawn cannot drift. */
+.wl-table th[aria-sort] {
+  color: var(--icp-fg);
+}
+
+.wl-table th[aria-sort]::after {
+  content: "";
+  display: inline-block;
+  margin-left: var(--space-2, 0.5rem);
+  border-left: 0.28em solid transparent;
+  border-right: 0.28em solid transparent;
+}
+
+.wl-table th[aria-sort="ascending"]::after {
+  border-bottom: 0.34em solid currentColor;
+}
+
+.wl-table th[aria-sort="descending"]::after {
+  border-top: 0.34em solid currentColor;
+}
+
+/* The count that rides the Worklists tab. Hidden at zero by the renderer, so this never
+   styles an empty badge. */
+.tab-count {
+  display: inline-block;
+  margin-left: var(--space-2, 0.5rem);
+  padding: 0 0.4em;
+  border-radius: 999px;
+  background: var(--icp-accent);
+  color: var(--icp-bg, #fff);
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Forced-colours mode drops the accent fill, which would leave the count unreadable on
+   its own background. A border keeps it a badge. */
+@media (forced-colors: active) {
+  .tab-count {
+    border: 1px solid CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+}
+
+.lookup-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2, 0.5rem);
+  margin-block: var(--space-3, 0.75rem);
+}
+
+.lookup-row input {
+  font-family: var(--font-mono);
+  flex: 1 1 22rem;
+  min-width: 0;
+}
+
+/* ⚠️ Not colour alone: an unhealthy canister is the one reading on this panel someone
+   might act on, so it gets weight as well. */
+#diag-health-state[data-healthy="false"] {
+  font-weight: 600;
+  color: var(--icp-fg);
+}
+
+/* ── the configuration surface ──────────────────────────────────────── */
+
+.config-group {
+  padding-block: var(--space-4);
+  border-top: 1px solid var(--icp-rule);
+}
+.config-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 14rem) minmax(0, 1fr);
+  gap: var(--space-2) var(--space-4);
+  margin: var(--space-3) 0 0;
+}
+.config-fields dt {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  color: var(--icp-fg);
+}
+.config-fields dd {
+  margin: 0;
+}
+/* The value gets the mono treatment because it is the thing being changed. */
+.config-value {
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--icp-fg);
+}
+/* The explanation spans both columns: it is prose, and squeezing it into the value
+   column would set it at a measure nobody reads. */
+.config-doc,
+.config-fields dd:not(.config-value) {
+  grid-column: 1 / -1;
+  max-width: 76ch;
+}
+/* What running the command cannot undo. Reads as a warning without a pictograph,
+   which brand-lint bans in user-facing copy. */
+.config-danger {
+  font-family: var(--font-ui);
+  font-size: 0.875rem;
+  color: var(--icp-err);
+  border-left: 2px solid currentColor;
+  padding-left: var(--space-3);
+  margin-top: var(--space-3);
+  max-width: 76ch;
+}
+
+/* ── the dashboard, and rows that look like rows ───────────────────────────── */
+
+.balance-block {
+  padding-block: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--icp-rule);
+  margin-bottom: var(--space-5);
+}
+
+/* A row is navigable, so it says so. It used to be a `tr` with an onclick and no
+   affordance at all: no cursor, no hover, and nothing a keyboard could reach. The
+   order id is a real link now, and this makes the whole row read as its target. */
+.order-row {
+  cursor: pointer;
+}
+.order-row:hover {
+  background: var(--icp-accent-dim);
+}
+.order-row:focus-within {
+  outline: 2px solid var(--icp-accent);
+  outline-offset: -2px;
+}
+.order-link {
+  color: var(--icp-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The order record's own facts, no longer inside a disclosure. */
+/* ── the two records, one tab each ────────────────────────────────────────── */
+
+.record-tabs {
+  display: flex;
+  gap: var(--space-2);
+  border-bottom: 1px solid var(--icp-rule);
+  margin: var(--space-5) 0 var(--space-4);
+  /* Narrow screens: the two labels are long, so they wrap to a second line rather
+     than forcing the page to scroll sideways. */
+  flex-wrap: wrap;
+}
+
+.record-tab {
+  font-family: var(--font-ui);
+  font-size: 0.9375rem;
+  color: var(--icp-fg-secondary);
+  text-decoration: none;
+  padding: var(--space-2) var(--space-3);
+  /* Reserved on every tab, so selecting one does not move the row by 2px. */
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.record-tab:hover {
+  color: var(--icp-fg);
+}
+
+/* ⚠️ The selected tab is marked by WEIGHT and a RULE, not by colour alone.
+   `aria-current` is the single source of truth: the same attribute assistive tech
+   reads drives the visual state, so the two cannot drift. Keyed off the attribute
+   rather than a class for exactly that reason. */
+.record-tab[aria-current] {
+  color: var(--icp-fg);
+  font-weight: 600;
+  border-bottom-color: var(--icp-accent);
+}
+
+/* Forced-colours mode drops author colours, taking the accent rule with it. The
+   selected tab keeps a visible mark there because the border is restated in a
+   system colour. */
+@media (forced-colors: active) {
+  .record-tab[aria-current] {
+    border-bottom-color: Highlight;
+  }
+}
+
+.record-tab:focus-visible {
+  outline: 2px solid var(--icp-accent);
+  outline-offset: 2px;
+}
+
+.orders-table {
+  width: 100%;
+}
+
+/* The order-history id, as a control. ⚠️ It has to LOOK interactive: the panel's whole
+   loop is "see the row, look it up", and a monospace id that happens to be clickable
+   reads as text. So the accent is its RESTING state and hover adds the underline.
+   Keyboard focus needs no rule here: the bare `:focus-visible` selector above gives
+   every focusable element the accent outline, and nothing in this sheet suppresses it.
+   `layout.spec.ts` asserts that ring rather than trusting the cascade. */
+.id-fill {
+  font-family: var(--font-mono);
+  font-size: inherit;
+  color: var(--icp-accent);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.id-fill:hover {
+  text-decoration: underline;
+}
