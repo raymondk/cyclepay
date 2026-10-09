@@ -155,6 +155,37 @@ mixin (
     rates : ?Pricing.Rates;
   };
 
+  /// The least amount that buys at least a cycle quantity (§3 inverted), or why
+  /// there is none.
+  type CyclesQuoteOutcome = {
+    /// `usdCents` is the gross amount to pay: pass it to `create_order` as
+    /// `#custom` with `minCycles = cycles` and the "at least" promise is enforced
+    /// at creation. `cyclesQuoted` is what it buys, never below `cycles`.
+    #ok : { usdCents : Nat; feeCents : Nat; netCents : Nat; cyclesQuoted : Nat };
+    /// The least amount is above the per-purchase ceiling. Carries both figures,
+    /// as the gate's own refusal does.
+    #amountAboveMax : { usdCents : Nat; maxUsdCents : Nat };
+    /// The least amount is below the per-purchase floor, so the floor is the
+    /// amount to pay and it buys more than was asked.
+    #amountBelowMin : { usdCents : Nat; minUsdCents : Nat };
+    /// No fresh rates, so no amount can be named (§3.1 fail-closed).
+    #stale;
+    /// Exactly `create_order`'s refusal for the amount named.
+    #unpriceable : Pricing.Unpriceable;
+  };
+
+  type CyclesQuote = {
+    /// What was asked for.
+    cycles : Nat;
+    outcome : CyclesQuoteOutcome;
+  };
+
+  type CyclesQuotes = {
+    quotes : [CyclesQuote];
+    /// As `QuotePreviews.rates`.
+    rates : ?Pricing.Rates;
+  };
+
   /// One quote = one consistent epoch: the caller snapshots the rail's fee
   /// formula *before* any await, and both rates are read once from the cache
   /// here. The §6.1 pricing snapshot persisted on the order carries both rate
@@ -208,6 +239,34 @@ mixin (
         ));
       };
     };
+  };
+
+  /// One inverse quote, bounded like an order: an amount the gate would refuse is
+  /// reported as the gate's reason rather than as a price nobody can pay.
+  func cyclesQuote(fee : { feeBps : Nat; feeFixedCents : Nat }, cycles : Nat) : CyclesQuote {
+    let outcome : CyclesQuoteOutcome = switch (
+      Pricing.quoteForCycles(
+        rateCache,
+        fee,
+        pricingState.config.maxAgeNs,
+        cycles,
+        Time.now(),
+        pricingState.config.divisor,
+        reserveState.cyclesLedgerFee,
+      )
+    ) {
+      case (#stale) #stale;
+      case (#unpriceable(cause)) #unpriceable(cause);
+      case (#ok(quote)) {
+        let config = gateState.config;
+        if (quote.usdCents > config.maxPurchaseUsdCents) {
+          #amountAboveMax({ usdCents = quote.usdCents; maxUsdCents = config.maxPurchaseUsdCents });
+        } else if (quote.usdCents < config.minPurchaseUsdCents) {
+          #amountBelowMin({ usdCents = quote.usdCents; minUsdCents = config.minPurchaseUsdCents });
+        } else #ok(quote);
+      };
+    };
+    { cycles; outcome };
   };
 
   /// Create a card-rail order: II caller becomes the owner (ownership is
@@ -419,6 +478,29 @@ mixin (
     );
     {
       quotes;
+      rates = Pricing.lastRates(rateCache);
+    };
+  };
+
+  /// Batch inverse quote, public: per target, the least gross amount whose quote
+  /// delivers at least that many cycles (§3), and what it actually buys.
+  ///
+  /// Computed by the same code path that prices an order, so the amount it names is
+  /// the one `create_order` honours: pass it as `#custom` with `minCycles` set to the
+  /// target and the "at least" promise is enforced at creation. A client inverting
+  /// `quote_previews` by hand is guessing the fee formula and the rounding, and is
+  /// wrong the moment either changes.
+  ///
+  /// The gate's floor and ceiling are applied to the amount named, so "too small" and
+  /// "too large" come back without a second call. Unbounded input for the same reason
+  /// `quote_previews` is.
+  public query func quote_for_cycles(targets : [Nat]) : async CyclesQuotes {
+    let fee : { feeBps : Nat; feeFixedCents : Nat } = {
+      feeBps = pricingState.config.feeBps;
+      feeFixedCents = pricingState.config.feeFixedCents;
+    };
+    {
+      quotes = targets.map(func(cycles) = cyclesQuote(fee, cycles));
       rates = Pricing.lastRates(rateCache);
     };
   };

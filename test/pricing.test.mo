@@ -537,3 +537,171 @@ suite("minimum rate sources", func() {
     assert config.minRateSources <= 3;
   });
 });
+
+// ── §3 inverted: the least amount that buys at least N ────────────────────
+
+func inverseAt(divisor : Nat, cycles : Nat) : {
+  #ok : { usdCents : Nat; feeCents : Nat; netCents : Nat; cyclesQuoted : Nat };
+  #stale;
+  #unpriceable : Pricing.Unpriceable;
+} {
+  Pricing.quoteForCycles(cacheAt(1_000), fee, config.maxAgeNs, cycles, 1_100, divisor, LEDGER_FEE);
+};
+
+/// What `quote` says a gross amount buys, or null when it refuses — the forward
+/// oracle every least-ness assertion below is checked against.
+func forward(feeShape : { feeBps : Nat; feeFixedCents : Nat }, divisor : Nat, gross : Nat) : ?Nat {
+  switch (Pricing.quote(cacheAt(1_000), feeShape, config.maxAgeNs, gross, 1_100, divisor, LEDGER_FEE)) {
+    case (#ok({ cycles })) ?cycles;
+    case (_) null;
+  };
+};
+
+suite("inverse quote: the net bound", func() {
+  test("THE VECTOR inverted: 3.5 T cycles need exactly 455¢ net", func() {
+    assert Pricing.netCentsForCycles(VECTOR_CYCLES, XDR_PERMYRIAD, USD_PER_ICP_MICROS, PROD) == ?NET_CENTS;
+  });
+
+  test("one cycle more rounds UP to the next cent, never down", func() {
+    assert Pricing.netCentsForCycles(VECTOR_CYCLES + 1, XDR_PERMYRIAD, USD_PER_ICP_MICROS, PROD) == ?(NET_CENTS + 1);
+  });
+
+  test("the divisor scales the bound up: a scaled quote needs d× the net", func() {
+    assert Pricing.netCentsForCycles(VECTOR_CYCLES, XDR_PERMYRIAD, USD_PER_ICP_MICROS, 1_000) == ?(NET_CENTS * 1_000);
+  });
+
+  test("a zero CMC rate is null, not a division trap", func() {
+    assert Pricing.netCentsForCycles(VECTOR_CYCLES, 0, USD_PER_ICP_MICROS, PROD) == null;
+  });
+});
+
+suite("inverse quote: the gross bound", func() {
+  test("THE VECTOR inverted: 455¢ net needs exactly 500¢ gross", func() {
+    assert Pricing.grossCentsForNet(fee, NET_CENTS) == ?500;
+  });
+
+  test("456¢ net needs 501¢: the forward fee at 500¢ leaves only 455¢", func() {
+    assert Pricing.grossCentsForNet(fee, NET_CENTS + 1) == ?501;
+    assert Pricing.netCents(fee, 500) == ?455;
+    assert Pricing.netCents(fee, 501) == ?456;
+  });
+
+  test("a zero net is raised to one cent, because netCents is null at zero", func() {
+    // 32¢ is the smallest amount the default fee does not swallow.
+    assert Pricing.grossCentsForNet(fee, 0) == ?32;
+    assert Pricing.grossCentsForNet(fee, 1) == ?32;
+    assert Pricing.netCents(fee, 31) == null;
+  });
+
+  test("a zero-fee formula needs exactly the net", func() {
+    assert Pricing.grossCentsForNet({ feeBps = 0; feeFixedCents = 0 }, 455) == ?455;
+  });
+
+  test("a fee of 100% or more can never be inverted", func() {
+    assert Pricing.grossCentsForNet({ feeBps = 10_000; feeFixedCents = 0 }, 455) == null;
+  });
+
+  test("the gross is the LEAST that clears, at every fee shape and net", func() {
+    let shapes = [
+      { feeBps = 290; feeFixedCents = 30 },
+      { feeBps = 0; feeFixedCents = 0 },
+      { feeBps = 0; feeFixedCents = 30 },
+      { feeBps = 500; feeFixedCents = 0 },
+      { feeBps = 9_999; feeFixedCents = 1 },
+      { feeBps = 1; feeFixedCents = 1 },
+    ];
+    for (shape in shapes.values()) {
+      for (net in [1, 2, 3, 97, 455, 456, 999, 1_000, 123_456].values()) {
+        let ?gross = Pricing.grossCentsForNet(shape, net) else return assert false;
+        switch (Pricing.netCents(shape, gross)) {
+          case (?got) assert got >= net;
+          case null assert false;
+        };
+        // The cent below does not clear it: either the fee swallows it, or it nets less.
+        switch (Pricing.netCents(shape, gross - 1)) {
+          case (?got) assert got < net;
+          case null {};
+        };
+      };
+    };
+  });
+});
+
+suite("inverse quote (the composed path)", func() {
+  test("THE VECTOR inverted end to end: 3.5 T costs 500¢ and buys exactly 3.5 T", func() {
+    assert inverseAt(PROD, VECTOR_CYCLES) == #ok({ usdCents = 500; feeCents = 45; netCents = NET_CENTS; cyclesQuoted = VECTOR_CYCLES });
+  });
+
+  test("one cycle more costs one cent more, and buys more than asked", func() {
+    switch (inverseAt(PROD, VECTOR_CYCLES + 1)) {
+      case (#ok({ usdCents; cyclesQuoted })) {
+        assert usdCents == 501;
+        assert cyclesQuoted >= VECTOR_CYCLES + 1;
+        // Least-ness, from the forward quote: the cent below buys fewer.
+        assert forward(fee, PROD, 500) == ?VECTOR_CYCLES;
+      };
+      case (_) assert false;
+    };
+  });
+
+  test("the amount named is the LEAST that delivers, checked against the forward quote", func() {
+    let targets = [1, 1_000_000_000, 1_000_000_000_001, VECTOR_CYCLES, VECTOR_CYCLES + 1, 7_238_461_538_461, 10 ** 15];
+    for (divisor in [PROD, 7, 1_000].values()) {
+      for (target in targets.values()) {
+        switch (inverseAt(divisor, target)) {
+          case (#ok({ usdCents; cyclesQuoted })) {
+            assert cyclesQuoted >= target;
+            assert forward(fee, divisor, usdCents) == ?cyclesQuoted;
+            switch (forward(fee, divisor, usdCents - 1)) {
+              case (?fewer) assert fewer < target;
+              case null {};
+            };
+          };
+          // A scaled quote for a tiny target can legitimately fall under the ledger
+          // fee; what must never happen is a figure that the forward quote refuses.
+          case (#unpriceable(#simulationScale(_))) assert divisor > PROD;
+          case (_) assert false;
+        };
+      };
+    };
+  });
+
+  test("the fee split accounts for every cent", func() {
+    switch (inverseAt(PROD, 10 ** 13)) {
+      case (#ok({ usdCents; feeCents; netCents })) assert feeCents + netCents == usdCents;
+      case (_) assert false;
+    };
+  });
+
+  test("zero cycles names the smallest priceable amount, not zero", func() {
+    switch (inverseAt(PROD, 0)) {
+      case (#ok({ usdCents; cyclesQuoted })) {
+        assert usdCents == 32;
+        assert cyclesQuoted > 0;
+      };
+      case (_) assert false;
+    };
+  });
+
+  test("a stale or empty cache is #stale: no rates, no bound, no amount", func() {
+    let cache = cacheAt(1_000);
+    assert Pricing.quoteForCycles(cache, fee, config.maxAgeNs, VECTOR_CYCLES, 1_000 + config.maxAgeNs, PROD, LEDGER_FEE) == #stale;
+    assert Pricing.quoteForCycles(Pricing.emptyCache(), fee, config.maxAgeNs, VECTOR_CYCLES, 1_100, PROD, LEDGER_FEE) == #stale;
+  });
+
+  test("a zero CMC rate in the cache is #unpriceable, not a trap", func() {
+    let cache = Pricing.emptyCache();
+    Pricing.record(cache, { ratesAt(1_000) with xdrPermyriadPerIcp = 0 });
+    assert Pricing.quoteForCycles(cache, fee, config.maxAgeNs, VECTOR_CYCLES, 1_100, PROD, LEDGER_FEE) == #unpriceable(#stripeFee);
+  });
+
+  test("an over-scaled target is #simulationScale, exactly as create_order would say", func() {
+    // One cycle at a divisor of a billion: the least gross is 32¢, and its scaled
+    // quantity cannot clear the ledger fee. The amount is NOT named, because
+    // create_order would refuse it.
+    switch (inverseAt(1_000_000_000, 1)) {
+      case (#unpriceable(#simulationScale({ ledgerFee }))) assert ledgerFee == LEDGER_FEE;
+      case (_) assert false;
+    };
+  });
+});

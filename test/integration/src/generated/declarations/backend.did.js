@@ -290,6 +290,39 @@ export const idlFactory = ({ IDL }) => {
     'inFlight' : IDL.Null,
   });
   const Result_13 = IDL.Variant({ 'ok' : Order, 'err' : ProcessOrderError });
+  const Unpriceable = IDL.Variant({
+    'simulationScale' : IDL.Record({
+      'ledgerFee' : IDL.Nat,
+      'scaledCycles' : IDL.Nat,
+    }),
+    'stripeFee' : IDL.Null,
+  });
+  const CyclesQuoteOutcome = IDL.Variant({
+    'ok' : IDL.Record({
+      'netCents' : IDL.Nat,
+      'feeCents' : IDL.Nat,
+      'usdCents' : IDL.Nat,
+      'cyclesQuoted' : IDL.Nat,
+    }),
+    'amountAboveMax' : IDL.Record({
+      'maxUsdCents' : IDL.Nat,
+      'usdCents' : IDL.Nat,
+    }),
+    'unpriceable' : Unpriceable,
+    'stale' : IDL.Null,
+    'amountBelowMin' : IDL.Record({
+      'usdCents' : IDL.Nat,
+      'minUsdCents' : IDL.Nat,
+    }),
+  });
+  const CyclesQuote = IDL.Record({
+    'cycles' : IDL.Nat,
+    'outcome' : CyclesQuoteOutcome,
+  });
+  const CyclesQuotes = IDL.Record({
+    'quotes' : IDL.Vec(CyclesQuote),
+    'rates' : IDL.Opt(Rates),
+  });
   const QuotePreview = IDL.Record({
     'netCents' : IDL.Opt(IDL.Nat),
     'feeCents' : IDL.Nat,
@@ -609,6 +642,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'process_order' : IDL.Func([OrderId], [Result_13], []),
+    'quote_for_cycles' : IDL.Func(
+        [IDL.Vec(IDL.Nat)],
+        [CyclesQuotes],
+        ['query'],
+      ),
     'quote_previews' : IDL.Func([IDL.Vec(IDL.Nat)], [QuotePreviews], ['query']),
     'receipt' : IDL.Func([OrderId], [IDL.Opt(Receipt)], ['query']),
     'record_delivered' : IDL.Func([OrderId, IDL.Nat], [Result_12], []),

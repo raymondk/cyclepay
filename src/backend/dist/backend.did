@@ -33,6 +33,14 @@ type ValidateError =
    emptyTierId;
    zeroUsdCents: text;
  };
+type Unpriceable = 
+ variant {
+   simulationScale: record {
+                      ledgerFee: nat;
+                      scaledCycles: nat;
+                    };
+   stripeFee;
+ };
 type TransferIntent = 
  record {
    amountCycles: nat;
@@ -504,6 +512,35 @@ type DelayedDelivery =
    retries: nat;
    status: OrderStatus;
    waitedNs: int;
+ };
+type CyclesQuotes = 
+ record {
+   quotes: vec CyclesQuote;
+   rates: opt Rates;
+ };
+type CyclesQuoteOutcome = 
+ variant {
+   amountAboveMax: record {
+                     maxUsdCents: nat;
+                     usdCents: nat;
+                   };
+   amountBelowMin: record {
+                     minUsdCents: nat;
+                     usdCents: nat;
+                   };
+   ok: record {
+         cyclesQuoted: nat;
+         feeCents: nat;
+         netCents: nat;
+         usdCents: nat;
+       };
+   stale;
+   unpriceable: Unpriceable;
+ };
+type CyclesQuote = 
+ record {
+   cycles: nat;
+   outcome: CyclesQuoteOutcome;
  };
 type CreatedOrder = record {order: Order;};
 type CreateOrderError = 
@@ -1106,6 +1143,19 @@ service : {
   /// nothing and a refresh loop would be permanent state growth driven by a
   /// caller. An admin kick is audited — it is an ops action on someone else's order.
   process_order: (id: OrderId) -> (Result_13);
+  /// Batch inverse quote, public: per target, the least gross amount whose quote
+  /// delivers at least that many cycles (§3), and what it actually buys.
+  /// 
+  /// Computed by the same code path that prices an order, so the amount it names is
+  /// the one `create_order` honours: pass it as `#custom` with `minCycles` set to the
+  /// target and the "at least" promise is enforced at creation. A client inverting
+  /// `quote_previews` by hand is guessing the fee formula and the rounding, and is
+  /// wrong the moment either changes.
+  /// 
+  /// The gate's floor and ceiling are applied to the amount named, so "too small" and
+  /// "too large" come back without a second call. Unbounded input for the same reason
+  /// `quote_previews` is.
+  quote_for_cycles: (targets: vec nat) -> (CyclesQuotes) query;
   /// Batch pre-purchase quote, public.
   /// 
   /// ⚠️ **The price a buyer is shown is computed by the SAME function that prices the

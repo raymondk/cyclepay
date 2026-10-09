@@ -258,6 +258,16 @@ array, deliberately: work is constant per element the caller already transmitted
 cap would only buy silent truncation. It does not disclose the cycles-ledger fee (§3.2);
 the frontend asks the ledger directly and shows `cycles − fee`.
 
+**The inverse is answered by the gateway too.** `quote_for_cycles(targets)` returns, per
+cycle target, the least gross amount whose quote delivers at least that many cycles, what
+it actually buys, and the fee split; it runs the forward quote on the amount it names, so
+the figure is the one `create_order` prices. Pass it as `#custom` with `minCycles` set to
+the target and the "at least" promise is enforced at creation. An amount outside the
+gate's floor or ceiling comes back as that refusal, carrying the bound, so a client can
+say "too small" or "too large" without a second call. A client inverting `quote_previews`
+by hand is guessing the fee formula and the rounding, and is wrong the moment either
+changes.
+
 **The rate is locked at creation, and the lock is enforced.**
 `create_order(amount, destination, minCycles)` takes an optional minimum. If the current
 rate no longer clears it, the call returns `#quoteChanged {quoted; minimum}` and creates
@@ -578,8 +588,8 @@ Public queries:
 `health` ·
 `admin_status` · `lifecycle_config` · `operator_summary` · `orphan_depth` ·
 `pricing_status` · `problem_depth` ·
-`quote_previews` · `recovery_status` · `refusal_counts` · `reserve_status` ·
-`stripe_origin`
+`quote_for_cycles` · `quote_previews` · `recovery_status` · `refusal_counts` ·
+`reserve_status` · `stripe_origin`
 
 <!-- /surface -->
 
