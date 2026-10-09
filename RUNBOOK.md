@@ -246,6 +246,7 @@ HTTPS outcall and no settable rate source.
 ```bash
 icp canister call backend pricing_status '()' -e ic   # public: both rates, config, last refresh
 icp canister call backend quote_previews '(vec { 500 : nat })' -e ic  # public: what an amount buys
+icp canister call backend quote_for_cycles '(vec { 5_000_000_000_000 : nat })' -e ic  # public: the least amount that buys 5 T
 icp canister call backend refresh_rates '()' -e ic --identity <operator>   # force a tick now
 icp canister call backend set_pricing_config \
   '(record { feeBps = 290 : nat; feeFixedCents = 30 : nat; maxAgeNs = 300_000_000_000 : nat; maxRateDeltaBps = 5_000 : nat; minRateSources = 2 : nat })' \
@@ -728,8 +729,8 @@ These are public queries, so a monitor can poll them anonymously:
 `health` ·
 `admin_status` · `lifecycle_config` · `operator_summary` · `orphan_depth` ·
 `pricing_status` · `problem_depth` ·
-`quote_previews` · `recovery_status` · `refusal_counts` · `reserve_status` ·
-`stripe_origin`
+`quote_for_cycles` · `quote_previews` · `recovery_status` · `refusal_counts` ·
+`reserve_status` · `stripe_origin`
 
 <!-- /surface -->
 

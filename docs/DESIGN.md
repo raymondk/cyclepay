@@ -70,6 +70,14 @@ XDR/cycles. A refresh that fails leaves the previous rates standing, and orders 
 being quotable once the cache passes its staleness window. Refusing to sell is the safe
 direction.
 
+**Both directions of the formula are the gateway's.** "What does this amount buy" and
+"what is the least that buys this many" are answered by the same code path that prices
+an order. The inverse is exact rather than searched: `⌊x⌋ ≥ N` holds exactly when
+`x ≥ N`, so the net bound is `⌈N × usdPerIcpMicros / (xdrPermyriadPerIcp × 10¹²)⌉`, and
+the fee formula inverts in closed form. A client inverting the forward quote has to
+reconstruct the fee shape and the rounding from observed quotes, and is wrong the moment
+either changes, with no way to tell which side moved.
+
 ### §3.2 — Who owns which number
 
 ⚠️ **The canister reports what only it knows; the ledger owns what it owns.** The reserve

@@ -106,6 +106,26 @@ export type CreateOrderError = {
   { 'reserveUnavailable' : null } |
   { 'destinationNotOwned' : null };
 export interface CreatedOrder { 'order' : Order }
+export interface CyclesQuote {
+  'cycles' : bigint,
+  'outcome' : CyclesQuoteOutcome,
+}
+export type CyclesQuoteOutcome = {
+    'ok' : {
+      'netCents' : bigint,
+      'feeCents' : bigint,
+      'usdCents' : bigint,
+      'cyclesQuoted' : bigint,
+    }
+  } |
+  { 'amountAboveMax' : { 'maxUsdCents' : bigint, 'usdCents' : bigint } } |
+  { 'unpriceable' : Unpriceable } |
+  { 'stale' : null } |
+  { 'amountBelowMin' : { 'usdCents' : bigint, 'minUsdCents' : bigint } };
+export interface CyclesQuotes {
+  'quotes' : Array<CyclesQuote>,
+  'rates' : [] | [Rates],
+}
 export interface DelayedDelivery {
   'status' : OrderStatus,
   'waitedNs' : bigint,
@@ -399,6 +419,10 @@ export interface TransferIntent {
   'memo' : Uint8Array,
   'amountCycles' : bigint,
 }
+export type Unpriceable = {
+    'simulationScale' : { 'ledgerFee' : bigint, 'scaledCycles' : bigint }
+  } |
+  { 'stripeFee' : null };
 export type ValidateError = {
     'belowFloor' : {
       'id' : string,
@@ -970,6 +994,21 @@ export interface _SERVICE {
    * / caller. An admin kick is audited — it is an ops action on someone else's order.
    */
   'process_order' : ActorMethod<[OrderId], Result_13>,
+  /**
+   * / Batch inverse quote, public: per target, the least gross amount whose quote
+   * / delivers at least that many cycles (§3), and what it actually buys.
+   * /
+   * / Computed by the same code path that prices an order, so the amount it names is
+   * / the one `create_order` honours: pass it as `#custom` with `minCycles` set to the
+   * / target and the "at least" promise is enforced at creation. A client inverting
+   * / `quote_previews` by hand is guessing the fee formula and the rounding, and is
+   * / wrong the moment either changes.
+   * /
+   * / The gate's floor and ceiling are applied to the amount named, so "too small" and
+   * / "too large" come back without a second call. Unbounded input for the same reason
+   * / `quote_previews` is.
+   */
+  'quote_for_cycles' : ActorMethod<[Array<bigint>], CyclesQuotes>,
   /**
    * / Batch pre-purchase quote, public.
    * /

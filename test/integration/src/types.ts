@@ -61,6 +61,8 @@ export type Receipt = Unopt<Awaited<ReturnType<_SERVICE['receipt']>>>;
 export type Tier = Awaited<ReturnType<_SERVICE['card_tiers']>>[number];
 export type QuotePreviews = Awaited<ReturnType<_SERVICE['quote_previews']>>;
 export type QuotePreview = QuotePreviews['quotes'][number];
+export type CyclesQuotes = Awaited<ReturnType<_SERVICE['quote_for_cycles']>>;
+export type CyclesQuote = CyclesQuotes['quotes'][number];
 
 export type RefusalCounts = Awaited<ReturnType<_SERVICE['refusal_counts']>>['counts'];
 export type RailStateLatch = Awaited<ReturnType<_SERVICE['refusal_counts']>>['refusingNow'];

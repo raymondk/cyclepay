@@ -29,6 +29,7 @@ the gateway publishes, with no identity:
 
 ```bash
 icp canister call backend quote_previews '(vec { 1_000 : nat })' -e ic  # $10, with both rate inputs
+icp canister call backend quote_for_cycles '(vec { 5_000_000_000_000 : nat })' -e ic  # the least amount that buys 5 T
 icp canister call backend reserve_status  '()' -e ic
 icp canister call backend pricing_status  '()' -e ic
 icp canister call backend lifecycle_config '()' -e ic

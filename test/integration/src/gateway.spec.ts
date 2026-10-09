@@ -30,7 +30,7 @@ import {
 
   allDelayedDeliveries, allowTestBuyers } from './harness';
 import { Principal } from '@icp-sdk/core/principal';
-import type { Destination, OrphanEntry, Order } from './types';
+import type { CyclesQuote, Destination, OrphanEntry, Order } from './types';
 
 import { seal } from "./seal";
 let gw: Gateway;
@@ -4099,4 +4099,67 @@ test('91 — a granted admin can end one order and cannot change the rules', asy
   // the TARGET not being listed, and one wording for both would be unreadable in a log.
   expect(expectErr(await gw.asAdmin.remove_admin(stranger.caller)))
     .toHaveProperty('notPresent');
+});
+
+test('92 — quote_for_cycles names the least amount, and create_order honours it', async () => {
+  // The inverse of scenario 40. A client that wants "at least N cycles" used to
+  // reconstruct the fee formula and the rate from two forward quotes and search;
+  // the gateway now answers from the same code path that prices the order, so the
+  // amount it names is the one `create_order` locks.
+  await setXrcRate(gw);
+  await setCmcRate(gw);
+  await ensureRates(gw);
+  const { gate } = await gw.asAnon.lifecycle_config();
+
+  const ok = (q: CyclesQuote) => {
+    expect(q.outcome).toHaveProperty('ok');
+    return (q.outcome as { ok: { usdCents: bigint; feeCents: bigint; netCents: bigint; cyclesQuoted: bigint } }).ok;
+  };
+  const { quotes, rates } = await gw.asAnon.quote_for_cycles([
+    TIER_LOCKED_CYCLES, TIER_LOCKED_CYCLES + 1n, 0n, 10n ** 15n,
+  ]);
+  expect(quotes.map((q) => q.cycles)).toEqual([TIER_LOCKED_CYCLES, TIER_LOCKED_CYCLES + 1n, 0n, 10n ** 15n]);
+
+  // The §3 vector, inverted: 3.5 T cycles cost exactly the tier's 500¢, and the fee
+  // split accounts for every cent.
+  const exact = ok(quotes[0]!);
+  expect(exact.usdCents).toBe(TIER_USD_CENTS);
+  expect(exact.feeCents + exact.netCents).toBe(TIER_USD_CENTS);
+  expect(exact.cyclesQuoted).toBe(TIER_LOCKED_CYCLES);
+
+  // One cycle more costs one cent more and buys more than asked. Least-ness is
+  // checked against the public forward quote, not against the inverse's own
+  // arithmetic: the cent below buys fewer than the target.
+  const plusOne = ok(quotes[1]!);
+  expect(plusOne.usdCents).toBe(TIER_USD_CENTS + 1n);
+  expect(plusOne.cyclesQuoted).toBeGreaterThanOrEqual(TIER_LOCKED_CYCLES + 1n);
+  const forward = await gw.asAnon.quote_previews([TIER_USD_CENTS, TIER_USD_CENTS + 1n]);
+  expect(forward.quotes[0]!.cycles[0]!).toBeLessThan(TIER_LOCKED_CYCLES + 1n);
+  expect(forward.quotes[1]!.cycles[0]!).toBe(plusOne.cyclesQuoted);
+
+  // The gate's bounds come back with the answer, so "too small" and "too large"
+  // need no second call. Zero cycles names the smallest priceable amount, 32¢,
+  // which is under the floor; 1000 T cycles is above the ceiling.
+  expect(quotes[2]!.outcome).toEqual({ amountBelowMin: { usdCents: 32n, minUsdCents: gate.minPurchaseUsdCents } });
+  const tooLarge = quotes[3]!.outcome as { amountAboveMax: { usdCents: bigint; maxUsdCents: bigint } };
+  expect(tooLarge.amountAboveMax.maxUsdCents).toBe(gate.maxPurchaseUsdCents);
+  expect(tooLarge.amountAboveMax.usdCents).toBeGreaterThan(gate.maxPurchaseUsdCents);
+
+  // Reproducible from the returned inputs alone, as scenario 40 does for the forward quote.
+  const pair = rates[0]!;
+  expect(plusOne.netCents * pair.xdrPermyriadPerIcp * 10n ** 12n / pair.usdPerIcpMicros).toBe(plusOne.cyclesQuoted);
+
+  // The point: the named amount, pinned to the target, creates an order that locks
+  // at least the target. If the inverse ever drifted from the forward path this is
+  // the line that refuses with `#quoteChanged`.
+  const created = expectOk(
+    await createOrderWithSession(gw, { custom: plusOne.usdCents }, USER_ACCOUNT, [TIER_LOCKED_CYCLES + 1n]),
+  );
+  expect(created.order.pricing.usdCents).toBe(plusOne.usdCents);
+  expect(created.order.lockedCycles).toBe(plusOne.cyclesQuoted);
+  expectOk(await cancelOrderWithExpire(gw, created.order.id));
+
+  // Public, uncapped and empty-safe, like the forward query.
+  expect((await gw.asAnon.quote_for_cycles([])).quotes).toHaveLength(0);
+  expect((await gw.asAnon.quote_for_cycles(Array.from({ length: 64 }, (_, i) => BigInt(i) * 10n ** 12n))).quotes).toHaveLength(64);
 });

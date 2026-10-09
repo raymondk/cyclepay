@@ -401,4 +401,75 @@ module {
     #ok({ cycles; rates });
   };
 
+  // ── §3 inverted: the least amount that buys at least N cycles ─────────────
+
+  /// The least net amount whose `cyclesForCents` (then the divisor) reaches `cycles`.
+  ///
+  /// `quote` floors `net × P × 10¹² / (U × d)`, and `⌊x⌋ ≥ N` holds exactly when
+  /// `x ≥ N`, so the bound is `net ≥ ⌈N × U × d / (P × 10¹²)⌉` with no search. Null
+  /// on a zero CMC rate: nothing buys cycles at zero XDR per ICP, and the division
+  /// would trap.
+  public func netCentsForCycles(
+    cycles : Nat,
+    xdrPermyriadPerIcp : Nat,
+    usdPerIcpMicros : Nat,
+    divisor : Nat,
+  ) : ?Nat {
+    let perCent = xdrPermyriadPerIcp * 1_000_000_000_000;
+    if (perCent == 0) return null;
+    ?((cycles * usdPerIcpMicros * divisor + perCent - 1) / perCent);
+  };
+
+  /// The least gross amount whose `netCents` is at least `netNeeded`.
+  ///
+  /// `gross − ⌈gross·bps/10⁴⌉` is `⌊gross·(10⁴ − bps)/10⁴⌋`, so the bound is
+  /// `gross ≥ ⌈(netNeeded + fixed) × 10⁴ / (10⁴ − bps)⌉`, exact rather than searched.
+  /// `netCents` never decreases as the gross grows, so nothing cheaper clears it.
+  ///
+  /// `netNeeded` is raised to 1 because `netCents` is null, not zero, when the fee
+  /// swallows the amount. Null when the fee is 100% or more, which `validateConfig`
+  /// refuses.
+  public func grossCentsForNet(fee : { feeBps : Nat; feeFixedCents : Nat }, netNeeded : Nat) : ?Nat {
+    if (fee.feeBps >= 10_000) return null;
+    // Via Int then abs: the guard above makes this positive, which is a fact about the
+    // guard rather than the type, so the Nat form warns (M0155).
+    let kept = Int.abs(10_000 - fee.feeBps.toInt());
+    ?(((Nat.max(netNeeded, 1) + fee.feeFixedCents) * 10_000 + kept - 1) / kept);
+  };
+
+  /// `quote` inverted: the least gross amount whose quote delivers at least `cycles`,
+  /// and what that amount actually buys. Same inputs and the same refusals as `quote`,
+  /// because the gross it names is run through `quote` itself: the figure is the one
+  /// `create_order` prices, so a caller can pin `minCycles = cycles` and know it clears.
+  ///
+  /// `#stale` comes first here where `quote` checks the fee first, because the bound
+  /// needs the rates before there is any amount to net.
+  public func quoteForCycles(
+    cache : Cache,
+    fee : { feeBps : Nat; feeFixedCents : Nat },
+    maxAgeNs : Int,
+    cycles : Nat,
+    nowNs : Int,
+    divisor : Nat,
+    ledgerFee : Nat,
+  ) : {
+    #ok : { usdCents : Nat; feeCents : Nat; netCents : Nat; cyclesQuoted : Nat };
+    #stale;
+    #unpriceable : Unpriceable;
+  } {
+    let ?rates = freshRates(cache, maxAgeNs, nowNs) else return #stale;
+    let ?needed = netCentsForCycles(cycles, rates.xdrPermyriadPerIcp, rates.usdPerIcpMicros, divisor) else {
+      return #unpriceable(#stripeFee);
+    };
+    let ?usdCents = grossCentsForNet(fee, needed) else return #unpriceable(#stripeFee);
+    let ?net = netCents(fee, usdCents) else return #unpriceable(#stripeFee);
+    switch (quote(cache, fee, maxAgeNs, usdCents, nowNs, divisor, ledgerFee)) {
+      case (#ok({ cycles = cyclesQuoted })) {
+        #ok({ usdCents; feeCents = feeCents(fee, usdCents); netCents = net; cyclesQuoted });
+      };
+      case (#stale) #stale;
+      case (#unpriceable(cause)) #unpriceable(cause);
+    };
+  };
+
 };
