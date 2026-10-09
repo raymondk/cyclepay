@@ -632,7 +632,8 @@ verification pass. The precondition that makes it work: `Http.pathOf` strips the
 string, so the local gateway's `?canisterId=…` parameter does not break route matching.
 
 ```sh
-brew install stripe/stripe-cli/stripe   # once
+brew install stripe/stripe-cli/stripe   # once; on Linux, the release tarball:
+#   curl -fsSL https://github.com/stripe/stripe-cli/releases/latest/download/stripe_<ver>_linux_x86_64.tar.gz | tar -xz -C ~/.local/bin stripe
 stripe login                            # once, pick a SANDBOX account
 
 icp network start -d
@@ -641,8 +642,18 @@ scripts/local-dev-seed.sh               # gas, reserve, rates, tiers, the API ke
 scripts/stripe-dev.sh                   # prints the forward URL + wires the secret
 ```
 
+**No browser on the machine running the CLI** (a remote dev box, a container): `stripe
+login --non-interactive` prints a pairing URL and code to open on any device that is
+signed in to the Stripe Dashboard, and `stripe login --complete-device` then polls until
+it is approved. The code expires in a few minutes, so run the two back to back.
+`stripe login --interactive` is the alternative, but it needs a terminal to prompt for a
+secret key, and a restricted `rk_` key cannot open a CLI session.
+
 `stripe listen` prints a signing secret for the forwarding session (`whsec_…`), which is
-what goes into `set_webhook_secret`; it is not the Dashboard endpoint's secret. This
+what goes into `set_webhook_secret`; it is not the Dashboard endpoint's secret. The
+forwarder is started with `--events` naming the six event types the canister handles,
+read from `rails/Card.mo` and `mixins/Webhook.mo`; Stripe CLI 1.53 refuses to listen
+without a selection. This
 exercises the genuine path: real Stripe signatures, real event JSON, real retry
 behaviour on non-2xx.
 
