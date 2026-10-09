@@ -453,6 +453,28 @@ dependencies go.
 account on the cycles ledger, so anyone can read its balance without this canister's
 cooperation. What the canister adds is how much of that balance is already promised.
 
+**Queries are advisory; the update is the enforcement.** Both quote endpoints, the
+purchase preflight and the order reads are query calls, answered by one replica without
+consensus. The agent verifies the replica's signature on the answer, which attributes a
+lie to a node and prevents nothing. So nothing on the money path trusts a query:
+`create_order` reprices from the canister's own cache, locks the quantity, and sets the
+Stripe amount itself, so the amount a buyer sees on the Checkout page is the canister's
+and the quantity delivered for it is the canister's honest quote. A replica that inflates
+a quote, or names too small an amount for a cycle target, is caught by the minimum the
+client pins at creation: the update computes the real figure, refuses with it, and
+creates nothing. A replica that deflates a quote costs the buyer at most an overpayment
+against the least amount, bounded by the purchase ceiling, and still delivers the honest
+quantity. The rate pair a quote carries exists so a client can reproduce the arithmetic;
+a client that wants independent verification reads the two rate canisters, which are
+public. When a read must be trusted, any query method can be invoked as an update call
+through consensus.
+
+**Why not certify the quote.** Certifying the rate pair and the fee formula would let a
+client verify a price only by reimplementing the formula, which is the drift the
+gateway-side quote exists to prevent (§3.1). Calling the final quote as an update buys
+nothing the pinned minimum does not already give. The one residual exposure is a client
+that pays what it was told without comparing it to the forward quote.
+
 ## §9 — Layout and the test bar
 
 One Motoko backend canister plus a static asset canister, a hand-rolled `Http.mo` rather
